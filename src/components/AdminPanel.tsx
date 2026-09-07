@@ -31,13 +31,17 @@ import {
   Lock
 } from 'lucide-react';
 
-const ADMIN_PASSKEY = import.meta.env.VITE_ADMIN_PASSKEY || 'asthra11@admin';
+// Local-dev fallback only (used when /api/admin-verify is unreachable,
+// e.g. plain `vite dev`). In production the passkey is verified server-side
+// via the `ADMIN_PASSKEY` env var and never ships to the browser.
+const DEV_ADMIN_PASSKEY = import.meta.env.VITE_ADMIN_PASSKEY as string | undefined;
 
 export const AdminPanel: React.FC = () => {
   // Admin authentication state
   const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(false);
   const [passkeyInput, setPasskeyInput] = useState('');
   const [authError, setAuthError] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
 
   // Active admin tab
   const [adminTab, setAdminTab] = useState<'create' | 'roster' | 'questions' | 'warnings' | 'database'>('roster');
@@ -181,15 +185,49 @@ export const AdminPanel: React.FC = () => {
     };
   }, [isAdminAuthenticated]);
 
-  const handleAdminAuth = (e: React.FormEvent) => {
+  const handleAdminAuth = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (passkeyInput === ADMIN_PASSKEY) {
+    if (!passkeyInput.trim() || authLoading) return;
+    setAuthLoading(true);
+    setAuthError('');
+
+    const grantAccess = () => {
       soundManager.playSuccess();
       setIsAdminAuthenticated(true);
       setAuthError('');
-    } else {
+      setPasskeyInput('');
+    };
+    const denyAccess = (message: string) => {
       soundManager.playError();
-      setAuthError('Invalid Admin Passkey. Access restricted to Asthra 11.0 event staff.');
+      setAuthError(message);
+    };
+
+    try {
+      // Primary path: server-side verification (production on Vercel).
+      const res = await fetch('/api/admin-verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ passkey: passkeyInput }),
+      });
+      if (res.ok) {
+        grantAccess();
+      } else {
+        denyAccess('Invalid Admin Passkey. Access restricted to Asthra 11.0 event staff.');
+      }
+    } catch {
+      // Fallback path: API unreachable (e.g. local `vite dev` without
+      // `vercel dev`). Compare against the dev-only env var.
+      if (DEV_ADMIN_PASSKEY && passkeyInput === DEV_ADMIN_PASSKEY) {
+        grantAccess();
+      } else {
+        denyAccess(
+          DEV_ADMIN_PASSKEY
+            ? 'Invalid Admin Passkey. Access restricted to Asthra 11.0 event staff.'
+            : 'Admin verification service unreachable. Run via `vercel dev` or set VITE_ADMIN_PASSKEY for local development.'
+        );
+      }
+    } finally {
+      setAuthLoading(false);
     }
   };
 
@@ -569,11 +607,12 @@ ALTER PUBLICATION supabase_realtime ADD TABLE public.warnings;
 
             <button
               type="submit"
+              disabled={authLoading}
               className="cyber-btn cyber-btn-primary"
               style={{ width: '100%', padding: '12px' }}
             >
               <Unlock size={18} />
-              Unlock Admin Terminal
+              {authLoading ? 'Verifying...' : 'Unlock Admin Terminal'}
             </button>
 
             <div style={{ marginTop: '16px', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
