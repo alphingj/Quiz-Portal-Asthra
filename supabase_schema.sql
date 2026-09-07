@@ -73,52 +73,28 @@ ALTER TABLE public.submissions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.warnings ENABLE ROW LEVEL SECURITY;
 
 -- Allow read and write for anon during competition
--- (DROP first so the script is safe to re-run on an existing project)
-DROP POLICY IF EXISTS "Allow public read access on participants" ON public.participants;
-DROP POLICY IF EXISTS "Allow public insert on participants" ON public.participants;
-DROP POLICY IF EXISTS "Allow public update on participants" ON public.participants;
-DROP POLICY IF EXISTS "Allow public delete on participants" ON public.participants;
 CREATE POLICY "Allow public read access on participants" ON public.participants FOR SELECT USING (true);
 CREATE POLICY "Allow public insert on participants" ON public.participants FOR INSERT WITH CHECK (true);
 CREATE POLICY "Allow public update on participants" ON public.participants FOR UPDATE USING (true);
 CREATE POLICY "Allow public delete on participants" ON public.participants FOR DELETE USING (true);
 
-DROP POLICY IF EXISTS "Allow public read on questions" ON public.questions;
-DROP POLICY IF EXISTS "Allow public insert on questions" ON public.questions;
-DROP POLICY IF EXISTS "Allow public update on questions" ON public.questions;
-DROP POLICY IF EXISTS "Allow public delete on questions" ON public.questions;
 CREATE POLICY "Allow public read on questions" ON public.questions FOR SELECT USING (true);
 CREATE POLICY "Allow public insert on questions" ON public.questions FOR INSERT WITH CHECK (true);
 CREATE POLICY "Allow public update on questions" ON public.questions FOR UPDATE USING (true);
 CREATE POLICY "Allow public delete on questions" ON public.questions FOR DELETE USING (true);
 
-DROP POLICY IF EXISTS "Allow public read on submissions" ON public.submissions;
-DROP POLICY IF EXISTS "Allow public insert on submissions" ON public.submissions;
 CREATE POLICY "Allow public read on submissions" ON public.submissions FOR SELECT USING (true);
 CREATE POLICY "Allow public insert on submissions" ON public.submissions FOR INSERT WITH CHECK (true);
 
-DROP POLICY IF EXISTS "Allow public read on warnings" ON public.warnings;
-DROP POLICY IF EXISTS "Allow public insert on warnings" ON public.warnings;
-DROP POLICY IF EXISTS "Allow public delete on warnings" ON public.warnings;
 CREATE POLICY "Allow public read on warnings" ON public.warnings FOR SELECT USING (true);
 CREATE POLICY "Allow public insert on warnings" ON public.warnings FOR INSERT WITH CHECK (true);
 CREATE POLICY "Allow public delete on warnings" ON public.warnings FOR DELETE USING (true);
 
 -- 6. Enable Realtime Publications for live scoreboards
--- (skips tables already in the publication, so re-runs are safe)
-DO $$
-DECLARE
-    t TEXT;
-BEGIN
-    FOREACH t IN ARRAY ARRAY['participants', 'questions', 'submissions', 'warnings'] LOOP
-        IF NOT EXISTS (
-            SELECT 1 FROM pg_publication_tables
-            WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = t
-        ) THEN
-            EXECUTE format('ALTER PUBLICATION supabase_realtime ADD TABLE public.%I', t);
-        END IF;
-    END LOOP;
-END $$;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.participants;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.questions;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.submissions;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.warnings;
 
 -- 6. Seed Initial 3 Cryptography Questions
 INSERT INTO public.questions (round_number, title, cipher_type, ciphertext, clue, answer, points, difficulty, order_index)
