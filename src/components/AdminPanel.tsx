@@ -8,6 +8,7 @@ import {
   getSupabase
 } from '../services/supabaseClient';
 import { soundManager } from '../services/audio';
+import schemaSql from '../../supabase_schema.sql?raw';
 import { 
   Shield, 
   UserPlus, 
@@ -31,13 +32,17 @@ import {
   Lock
 } from 'lucide-react';
 
-const ADMIN_PASSKEY = import.meta.env.VITE_ADMIN_PASSKEY || 'asthra11@admin';
+// Local-dev fallback only (used when /api/admin-verify is unreachable,
+// e.g. plain `vite dev`). In production the passkey is verified server-side
+// via the `ADMIN_PASSKEY` env var and never ships to the browser.
+const DEV_ADMIN_PASSKEY = import.meta.env.VITE_ADMIN_PASSKEY as string | undefined;
 
 export const AdminPanel: React.FC = () => {
   // Admin authentication state
   const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(false);
   const [passkeyInput, setPasskeyInput] = useState('');
   const [authError, setAuthError] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
 
   // Active admin tab
   const [adminTab, setAdminTab] = useState<'create' | 'roster' | 'questions' | 'warnings' | 'database'>('roster');
@@ -181,15 +186,49 @@ export const AdminPanel: React.FC = () => {
     };
   }, [isAdminAuthenticated]);
 
-  const handleAdminAuth = (e: React.FormEvent) => {
+  const handleAdminAuth = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (passkeyInput === ADMIN_PASSKEY) {
+    if (!passkeyInput.trim() || authLoading) return;
+    setAuthLoading(true);
+    setAuthError('');
+
+    const grantAccess = () => {
       soundManager.playSuccess();
       setIsAdminAuthenticated(true);
       setAuthError('');
-    } else {
+      setPasskeyInput('');
+    };
+    const denyAccess = (message: string) => {
       soundManager.playError();
-      setAuthError('Invalid Admin Passkey. Access restricted to Asthra 11.0 event staff.');
+      setAuthError(message);
+    };
+
+    try {
+      // Primary path: server-side verification (production on Vercel).
+      const res = await fetch('/api/admin-verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ passkey: passkeyInput }),
+      });
+      if (res.ok) {
+        grantAccess();
+      } else {
+        denyAccess('Invalid Admin Passkey. Access restricted to Asthra 11.0 event staff.');
+      }
+    } catch {
+      // Fallback path: API unreachable (e.g. local `vite dev` without
+      // `vercel dev`). Compare against the dev-only env var.
+      if (DEV_ADMIN_PASSKEY && passkeyInput === DEV_ADMIN_PASSKEY) {
+        grantAccess();
+      } else {
+        denyAccess(
+          DEV_ADMIN_PASSKEY
+            ? 'Invalid Admin Passkey. Access restricted to Asthra 11.0 event staff.'
+            : 'Admin verification service unreachable. Run via `vercel dev` or set VITE_ADMIN_PASSKEY for local development.'
+        );
+      }
+    } finally {
+      setAuthLoading(false);
     }
   };
 
@@ -413,94 +452,8 @@ export const AdminPanel: React.FC = () => {
 
   const copySqlSchema = () => {
     soundManager.playKeypress();
-    const sql = `-- Asthra 11.0: KeyBreak Supabase Schema (with RBAC role column)
-CREATE TABLE IF NOT EXISTS public.participants (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    username TEXT UNIQUE NOT NULL,
-    password TEXT NOT NULL,
-    team_name TEXT,
-    current_question_index INTEGER DEFAULT 0,
-    score INTEGER DEFAULT 0,
-    completed BOOLEAN DEFAULT FALSE,
-    is_banned BOOLEAN DEFAULT FALSE,
-    warning_count INTEGER DEFAULT 0,
-    role TEXT DEFAULT 'participant' CHECK (role IN ('participant', 'moderator', 'admin')),
-    started_at TIMESTAMPTZ DEFAULT NOW(),
-    completed_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Migration for existing deployments: add role column if missing
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_schema = 'public' AND table_name = 'participants' AND column_name = 'role'
-    ) THEN
-        ALTER TABLE public.participants ADD COLUMN role TEXT DEFAULT 'participant' CHECK (role IN ('participant', 'moderator', 'admin'));
-    END IF;
-END $$;
-
-CREATE TABLE IF NOT EXISTS public.questions (
-    id SERIAL PRIMARY KEY,
-    round_number INTEGER NOT NULL,
-    title TEXT NOT NULL,
-    cipher_type TEXT NOT NULL,
-    ciphertext TEXT NOT NULL,
-    clue TEXT,
-    answer TEXT NOT NULL,
-    points INTEGER DEFAULT 100,
-    difficulty TEXT DEFAULT 'Beginner',
-    order_index INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS public.submissions (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    participant_id UUID REFERENCES public.participants(id) ON DELETE CASCADE,
-    question_id INTEGER REFERENCES public.questions(id) ON DELETE CASCADE,
-    submitted_answer TEXT NOT NULL,
-    is_correct BOOLEAN NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS public.warnings (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    participant_id UUID REFERENCES public.participants(id) ON DELETE CASCADE,
-    username TEXT NOT NULL,
-    team_name TEXT,
-    event_type TEXT NOT NULL,
-    details TEXT,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-ALTER TABLE public.participants ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.questions ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.submissions ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.warnings ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY "Allow public read on participants" ON public.participants FOR SELECT USING (true);
-CREATE POLICY "Allow public insert on participants" ON public.participants FOR INSERT WITH CHECK (true);
-CREATE POLICY "Allow public update on participants" ON public.participants FOR UPDATE USING (true);
-CREATE POLICY "Allow public delete on participants" ON public.participants FOR DELETE USING (true);
-
-CREATE POLICY "Allow public read on questions" ON public.questions FOR SELECT USING (true);
-CREATE POLICY "Allow public insert on questions" ON public.questions FOR INSERT WITH CHECK (true);
-CREATE POLICY "Allow public update on questions" ON public.questions FOR UPDATE USING (true);
-CREATE POLICY "Allow public delete on questions" ON public.questions FOR DELETE USING (true);
-
-CREATE POLICY "Allow public read on submissions" ON public.submissions FOR SELECT USING (true);
-CREATE POLICY "Allow public insert on submissions" ON public.submissions FOR INSERT WITH CHECK (true);
-
-CREATE POLICY "Allow public read on warnings" ON public.warnings FOR SELECT USING (true);
-CREATE POLICY "Allow public insert on warnings" ON public.warnings FOR INSERT WITH CHECK (true);
-CREATE POLICY "Allow public delete on warnings" ON public.warnings FOR DELETE USING (true);
-
-ALTER PUBLICATION supabase_realtime ADD TABLE public.participants;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.questions;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.submissions;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.warnings;
-`;
-    navigator.clipboard.writeText(sql);
+    // Single source of truth: copies the exact repo schema file.
+    navigator.clipboard.writeText(schemaSql);
     setCopiedSql(true);
     setTimeout(() => setCopiedSql(false), 2000);
   };
@@ -569,11 +522,12 @@ ALTER PUBLICATION supabase_realtime ADD TABLE public.warnings;
 
             <button
               type="submit"
+              disabled={authLoading}
               className="cyber-btn cyber-btn-primary"
               style={{ width: '100%', padding: '12px' }}
             >
               <Unlock size={18} />
-              Unlock Admin Terminal
+              {authLoading ? 'Verifying...' : 'Unlock Admin Terminal'}
             </button>
 
             <div style={{ marginTop: '16px', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
