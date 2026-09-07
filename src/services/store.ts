@@ -417,7 +417,16 @@ class StoreService {
     const supabase = getSupabase();
     if (supabase) {
       try {
-        await supabase.from('warnings').insert([warning]);
+        // Map to DB column names: table uses `created_at` (defaults to NOW()),
+        // not the frontend `timestamp` field — inserting unknown columns fails.
+        await supabase.from('warnings').insert([{
+          id: warning.id,
+          participant_id: warning.participant_id,
+          username: warning.username,
+          team_name: warning.team_name,
+          event_type: warning.event_type,
+          details: warning.details,
+        }]);
         await supabase.from('participants').update({ warning_count: newCount }).eq('id', participantId);
       } catch (err) {
         console.warn('Supabase warning insert error', err);
