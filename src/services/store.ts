@@ -1,4 +1,5 @@
-import type { Participant, Question, Submission, LeaderboardEntry, CheatingWarning } from '../types';
+import type { Participant, Question, Submission, LeaderboardEntry, CheatingWarning, CompetitionSettings } from '../types';
+import { DEFAULT_COMPETITION_SETTINGS } from '../types';
 import { getSupabase } from './supabaseClient';
 
 // Default 3 cipher questions for Asthra 11.0: KeyBreak
@@ -48,6 +49,7 @@ const STORAGE_PARTICIPANTS = 'asthra_participants_data';
 const STORAGE_QUESTIONS = 'asthra_questions_data';
 const STORAGE_SUBMISSIONS = 'asthra_submissions_data';
 const STORAGE_WARNINGS = 'asthra_cheat_warnings_data';
+const STORAGE_SETTINGS = 'asthra_competition_settings';
 
 class StoreService {
   private getLocalParticipants(): Participant[] {
@@ -186,6 +188,236 @@ class StoreService {
     return questions;
   }
 
+  // Delete a question entirely + renumber remaining rounds sequentially
+  public async deleteQuestion(id: number): Promise<Question[]> {
+    const questions = (await this.getQuestions()).filter(q => q.id !== id);
+    const renumbered = questions
+      .sort((a, b) => a.order_index - b.order_index)
+      .map((q, i) => ({ ...q, order_index: i + 1, round_number: i + 1 }));
+
+    const supabase = getSupabase();
+    if (supabase) {
+      try {
+        await supabase.from('questions').delete().eq('id', id);
+        if (renumbered.length > 0) {
+          await supabase.from('questions').upsert(renumbered);
+        }
+      } catch (err) {
+        console.warn('Supabase delete question error', err);
+      }
+    }
+    this.saveLocalQuestions(renumbered);
+    // Participants pointing past the shrunk list get clamped
+    const settings = await this.getCompetitionSettings();
+    await this.clampParticipantProgress(renumbered.length, settings.active_question_count);
+    return renumbered;
+  }
+
+  // --- COMPETITION SETTINGS API (timed-competition mode) ---
+  private getLocalSettings(): CompetitionSettings {
+    const data = localStorage.getItem(STORAGE_SETTINGS);
+    if (!data) {
+      localStorage.setItem(STORAGE_SETTINGS, JSON.stringify(DEFAULT_COMPETITION_SETTINGS));
+      return { ...DEFAULT_COMPETITION_SETTINGS };
+    }
+    try {
+      return { ...DEFAULT_COMPETITION_SETTINGS, ...JSON.parse(data) };
+    } catch {
+      return { ...DEFAULT_COMPETITION_SETTINGS };
+    }
+  }
+
+  private saveLocalSettings(settings: CompetitionSettings) {
+    localStorage.setItem(STORAGE_SETTINGS, JSON.stringify(settings));
+    this.notifyDataUpdate();
+  }
+
+  public async getCompetitionSettings(): Promise<CompetitionSettings> {
+    const supabase = getSupabase();
+    if (supabase) {
+      try {
+        const { data, error } = await supabase
+          .from('competition_settings')
+          .select('*')
+          .eq('id', 1)
+          .single();
+        if (!error && data) {
+          const settings: CompetitionSettings = {
+            id: 1,
+            status: data.status || 'waiting',
+            started_at: data.started_at || null,
+            time_limit_seconds: Number(data.time_limit_seconds) || 600,
+            decay_per_second: Number(data.decay_per_second) || 1,
+            active_question_count: Number(data.active_question_count) || 3,
+            updated_at: data.updated_at || new Date().toISOString(),
+          };
+          this.saveLocalSettings(settings);
+          return settings;
+        }
+      } catch (err) {
+        console.warn('Supabase fetch settings error, fallback to local', err);
+      }
+    }
+    return this.getLocalSettings();
+  }
+
+  public async updateCompetitionSettings(patch: Partial<CompetitionSettings>): Promise<CompetitionSettings> {
+    const prev = await this.getCompetitionSettings();
+    const next: CompetitionSettings = {
+      ...prev,
+      ...patch,
+      id: 1,
+      time_limit_seconds: Math.max(30, Math.floor(Number(patch.time_limit_seconds ?? prev.time_limit_seconds) || 600)),
+      decay_per_second: Math.max(0, Math.floor(Number(patch.decay_per_second ?? prev.decay_per_second) || 0)),
+      active_question_count: Math.max(1, Math.floor(Number(patch.active_question_count ?? prev.active_question_count) || 1)),
+      updated_at: new Date().toISOString(),
+    };
+
+    const supabase = getSupabase();
+    if (supabase) {
+      try {
+        await supabase.from('competition_settings').upsert({
+          id: 1,
+          status: next.status,
+          started_at: next.started_at,
+          time_limit_seconds: next.time_limit_seconds,
+          decay_per_second: next.decay_per_second,
+          active_question_count: next.active_question_count,
+          updated_at: next.updated_at,
+        });
+      } catch (err) {
+        console.warn('Supabase update settings error', err);
+      }
+    }
+    this.saveLocalSettings(next);
+
+    // If the admin shrank the active rounds, clamp anyone now past the end
+    if (next.active_question_count !== prev.active_question_count) {
+      const questions = await this.getQuestions();
+      await this.clampParticipantProgress(questions.length, next.active_question_count);
+    }
+    return next;
+  }
+
+  // Questions actually in play: first N by order_index
+  public async getActiveQuestions(): Promise<Question[]> {
+    const [questions, settings] = await Promise.all([
+      this.getQuestions(),
+      this.getCompetitionSettings(),
+    ]);
+    return questions.slice(0, Math.max(1, settings.active_question_count));
+  }
+
+  // Clamp participants whose index is past the available/active questions
+  private async clampParticipantProgress(totalQuestions: number, activeCount: number): Promise<void> {
+    const participants = await this.getParticipants();
+    const now = new Date().toISOString();
+    const updates: Participant[] = [];
+    for (const p of participants) {
+      const clampedIndex = Math.min(p.current_question_index, Math.max(0, totalQuestions));
+      const shouldComplete = clampedIndex >= Math.max(1, activeCount);
+      if (clampedIndex !== p.current_question_index || (shouldComplete && !p.completed)) {
+        updates.push({
+          ...p,
+          current_question_index: clampedIndex,
+          completed: p.completed || shouldComplete,
+          completed_at: p.completed_at || (shouldComplete ? now : null),
+        });
+      }
+    }
+    if (updates.length === 0) return;
+
+    const supabase = getSupabase();
+    if (supabase) {
+      try {
+        await Promise.all(updates.map(u =>
+          supabase.from('participants').update({
+            current_question_index: u.current_question_index,
+            completed: u.completed,
+            completed_at: u.completed_at,
+          }).eq('id', u.id)
+        ));
+      } catch (err) {
+        console.warn('Supabase clamp progress error', err);
+      }
+    }
+    const byId = new Map(updates.map(u => [u.id, u]));
+    this.saveLocalParticipants(this.getLocalParticipants().map(p => byId.get(p.id) || p));
+  }
+
+  // START COMPETITION: go live + reset every participant for a fresh run
+  public async startCompetition(): Promise<CompetitionSettings> {
+    const now = new Date().toISOString();
+    const participants = await this.getParticipants();
+    const resetData = {
+      current_question_index: 0,
+      score: 0,
+      completed: false,
+      started_at: now,
+      completed_at: null,
+      current_question_started_at: now,
+    };
+
+    const supabase = getSupabase();
+    if (supabase) {
+      try {
+        await Promise.all(participants.map(p =>
+          supabase.from('participants').update(resetData).eq('id', p.id)
+        ));
+      } catch (err) {
+        console.warn('Supabase start-competition reset error', err);
+      }
+    }
+    this.saveLocalParticipants(this.getLocalParticipants().map(p => ({ ...p, ...resetData })));
+    return this.updateCompetitionSettings({ status: 'live', started_at: now });
+  }
+
+  // END COMPETITION: lock the quiz terminal
+  public async endCompetition(): Promise<CompetitionSettings> {
+    return this.updateCompetitionSettings({ status: 'ended' });
+  }
+
+  // Back to waiting room (re-arm for another run without wiping config)
+  public async resetCompetitionToWaiting(): Promise<CompetitionSettings> {
+    return this.updateCompetitionSettings({ status: 'waiting', started_at: null });
+  }
+
+  // Ensure a participant has a per-question start timestamp (backfills legacy
+  // rows and late joiners). Returns the fresh participant row.
+  public async ensureQuestionStart(participantId: string): Promise<Participant | null> {
+    const participants = await this.getParticipants();
+    const p = participants.find(part => part.id === participantId);
+    if (!p) return null;
+    if (p.current_question_started_at) return p;
+
+    const now = new Date().toISOString();
+    const supabase = getSupabase();
+    if (supabase) {
+      try {
+        const { data } = await supabase
+          .from('participants')
+          .update({ current_question_started_at: now })
+          .eq('id', participantId)
+          .select()
+          .single();
+        if (data) {
+          const list = this.getLocalParticipants().map(part =>
+            part.id === participantId ? { ...part, current_question_started_at: now } : part
+          );
+          this.saveLocalParticipants(list);
+          return data as Participant;
+        }
+      } catch (err) {
+        console.warn('Supabase ensure question start error', err);
+      }
+    }
+    const list = this.getLocalParticipants().map(part =>
+      part.id === participantId ? { ...part, current_question_started_at: now } : part
+    );
+    this.saveLocalParticipants(list);
+    return { ...p, current_question_started_at: now };
+  }
+
   // --- PARTICIPANTS API ---
   public async getParticipants(): Promise<Participant[]> {
     const supabase = getSupabase();
@@ -228,14 +460,19 @@ class StoreService {
       started_at: new Date().toISOString(),
       completed_at: null,
       created_at: new Date().toISOString(),
+      current_question_started_at: new Date().toISOString(),
     };
 
     const supabase = getSupabase();
     if (supabase) {
       try {
+        // Omit the newest column from the insert payload so registration keeps
+        // working even if the timed-mode migration hasn't been run yet
+        // (the column defaults to NOW() in the DB).
+        const { current_question_started_at: _qStart, ...dbParticipant } = newParticipant;
         const { data, error } = await supabase
           .from('participants')
-          .insert([newParticipant])
+          .insert([dbParticipant])
           .select()
           .single();
         if (error) {
@@ -283,6 +520,7 @@ class StoreService {
       completed: false,
       started_at: new Date().toISOString(),
       completed_at: null,
+      current_question_started_at: new Date().toISOString(),
     };
 
     const supabase = getSupabase();
@@ -583,7 +821,59 @@ class StoreService {
     return null;
   }
 
-  // Submit Answer for Question
+  // Skip to next question after the per-question timer expired (0 points)
+  public async skipQuestion(participantId: string): Promise<{
+    success: boolean;
+    completedEvent: boolean;
+    updatedParticipant: Participant | null;
+    message: string;
+  }> {
+    const [participants, activeQuestions] = await Promise.all([
+      this.getParticipants(),
+      this.getActiveQuestions(),
+    ]);
+    const p = participants.find(part => part.id === participantId);
+    if (!p) {
+      return { success: false, completedEvent: false, updatedParticipant: null, message: 'Participant not found.' };
+    }
+    if (p.is_banned) {
+      return { success: false, completedEvent: false, updatedParticipant: p, message: 'Account disqualified / banned.' };
+    }
+
+    const now = new Date().toISOString();
+    const nextIndex = p.current_question_index + 1;
+    const completedEvent = nextIndex >= activeQuestions.length;
+    const updatedData = {
+      current_question_index: nextIndex,
+      completed: completedEvent,
+      completed_at: completedEvent ? now : p.completed_at,
+      current_question_started_at: now,
+    };
+
+    const supabase = getSupabase();
+    if (supabase) {
+      try {
+        await supabase.from('participants').update(updatedData).eq('id', participantId);
+      } catch (err) {
+        console.warn('Supabase skip question error', err);
+      }
+    }
+    const updatedList = this.getLocalParticipants().map(part =>
+      part.id === participantId ? { ...part, ...updatedData } : part
+    );
+    this.saveLocalParticipants(updatedList);
+    const updatedP = updatedList.find(part => part.id === participantId) || null;
+    return {
+      success: true,
+      completedEvent,
+      updatedParticipant: updatedP,
+      message: completedEvent
+        ? 'Time expired on the final round. Run complete.'
+        : 'Time expired. Skipped to next round with 0 points.',
+    };
+  }
+
+  // Submit Answer for Question (timed mode: points decay while the clock runs)
   public async submitAnswer(
     participantId: string,
     questionId: number,
@@ -594,6 +884,8 @@ class StoreService {
     completedEvent: boolean;
     updatedParticipant: Participant | null;
     message: string;
+    timedOut: boolean;
+    award?: { basePoints: number; elapsedSeconds: number; awarded: number };
   }> {
     // Check if banned
     const participants = await this.getParticipants();
@@ -604,12 +896,17 @@ class StoreService {
         pointsAwarded: 0,
         completedEvent: false,
         updatedParticipant: currentParticipant,
+        timedOut: false,
         message: 'Account disqualified / banned. Submissions rejected.',
       };
     }
 
     // Dynamically get the current questions directly from Supabase / store
-    const questions = await this.getQuestions();
+    const [questions, settings] = await Promise.all([
+      this.getQuestions(),
+      this.getCompetitionSettings(),
+    ]);
+    const activeQuestions = questions.slice(0, Math.max(1, settings.active_question_count));
     const currentQ = questions.find(q => q.id === questionId);
     if (!currentQ) {
       return {
@@ -617,6 +914,7 @@ class StoreService {
         pointsAwarded: 0,
         completedEvent: false,
         updatedParticipant: null,
+        timedOut: false,
         message: 'Question not found.',
       };
     }
@@ -655,11 +953,14 @@ class StoreService {
         pointsAwarded: 0,
         completedEvent: false,
         updatedParticipant: null,
+        timedOut: false,
         message: 'Incorrect cipher text decryption. Glitch detected! Try again.',
       };
     }
 
-    // Answer is correct! Calculate progression
+    // Answer is correct! Enforce the per-question clock, then decay points.
+    // Elapsed time is computed from the stored question-start timestamp so the
+    // award never trusts the client clock.
     const p = currentParticipant || (await this.getParticipants()).find(part => part.id === participantId);
     if (!p) {
       return {
@@ -667,20 +968,40 @@ class StoreService {
         pointsAwarded: currentQ.points,
         completedEvent: false,
         updatedParticipant: null,
+        timedOut: false,
         message: 'Flag accepted!',
       };
     }
 
+    const questionStartMs = p.current_question_started_at
+      ? new Date(p.current_question_started_at).getTime()
+      : Date.now();
+    const elapsedSeconds = Math.max(0, Math.floor((Date.now() - questionStartMs) / 1000));
+
+    if (elapsedSeconds > settings.time_limit_seconds) {
+      return {
+        isCorrect: false,
+        pointsAwarded: 0,
+        completedEvent: false,
+        updatedParticipant: p,
+        timedOut: true,
+        message: 'Time expired for this round. Use Skip to advance — this submission no longer counts.',
+      };
+    }
+
+    const awarded = Math.max(0, currentQ.points - elapsedSeconds * settings.decay_per_second);
+    const now = new Date().toISOString();
     const nextIndex = p.current_question_index + 1;
-    const completedEvent = nextIndex >= questions.length;
-    const newScore = p.score + currentQ.points;
-    const completedAt = completedEvent ? new Date().toISOString() : null;
+    const completedEvent = nextIndex >= activeQuestions.length;
+    const newScore = p.score + awarded;
+    const completedAt = completedEvent ? now : null;
 
     const updatedData = {
       current_question_index: nextIndex,
       score: newScore,
       completed: completedEvent,
       completed_at: completedAt,
+      current_question_started_at: now,
     };
 
     if (supabase) {
@@ -700,15 +1021,20 @@ class StoreService {
     this.saveLocalParticipants(updatedList);
 
     const updatedP = updatedList.find(part => part.id === participantId) || null;
+    const decayNote = awarded < currentQ.points
+      ? ` (decayed from ${currentQ.points} after ${elapsedSeconds}s)`
+      : '';
 
     return {
       isCorrect: true,
-      pointsAwarded: currentQ.points,
+      pointsAwarded: awarded,
       completedEvent,
       updatedParticipant: updatedP,
+      timedOut: false,
+      award: { basePoints: currentQ.points, elapsedSeconds, awarded },
       message: completedEvent
-        ? 'All ciphers breached! Decryption complete. Outstanding performance!'
-        : `Decryption successful! +${currentQ.points} points. Accessing next security layer...`,
+        ? `All ciphers breached! +${awarded} points${decayNote}. Decryption complete. Outstanding performance!`
+        : `Decryption successful! +${awarded} points${decayNote}. Accessing next security layer...`,
     };
   }
 

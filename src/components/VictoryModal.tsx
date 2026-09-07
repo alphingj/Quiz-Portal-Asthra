@@ -9,6 +9,7 @@ interface VictoryModalProps {
   participant: Participant;
   onClose: () => void;
   onViewLeaderboard: () => void;
+  totalRounds?: number;
 }
 
 export const VictoryModal: React.FC<VictoryModalProps> = ({
@@ -16,6 +17,7 @@ export const VictoryModal: React.FC<VictoryModalProps> = ({
   participant,
   onClose,
   onViewLeaderboard,
+  totalRounds = 3,
 }) => {
   useEffect(() => {
     if (isOpen) {
@@ -89,7 +91,7 @@ export const VictoryModal: React.FC<VictoryModalProps> = ({
         </h2>
 
         <p style={{ fontSize: '0.95rem', color: 'var(--text-secondary)', marginBottom: '24px' }}>
-          Team <strong style={{ color: 'var(--accent-amber)' }}>{participant.team_name || participant.username}</strong> successfully decoded all 3 cryptography defense layers.
+          Team <strong style={{ color: 'var(--accent-amber)' }}>{participant.team_name || participant.username}</strong> successfully decoded all {totalRounds} cryptography defense layer{totalRounds === 1 ? '' : 's'}.
         </p>
 
         {/* Stats Grid */}
@@ -123,7 +125,7 @@ export const VictoryModal: React.FC<VictoryModalProps> = ({
               <CheckCircle size={14} /> SOLVED
             </div>
             <div style={{ color: 'var(--status-forest)', fontSize: '1.25rem', fontWeight: 800, fontFamily: 'var(--font-mono)' }}>
-              3 / 3
+              {totalRounds} / {totalRounds}
             </div>
           </div>
 

@@ -12,6 +12,7 @@ export interface Participant {
   started_at: string;
   completed_at: string | null;
   created_at: string;
+  current_question_started_at?: string | null;
 }
 
 export interface Question {
@@ -64,5 +65,34 @@ export interface SupabaseConfig {
   url: string;
   anonKey: string;
   connected: boolean;
+}
+
+export type CompetitionStatus = 'waiting' | 'live' | 'ended';
+
+export interface CompetitionSettings {
+  id: number;
+  status: CompetitionStatus;
+  started_at: string | null;
+  time_limit_seconds: number;
+  decay_per_second: number;
+  active_question_count: number;
+  updated_at: string;
+}
+
+export const DEFAULT_COMPETITION_SETTINGS: CompetitionSettings = {
+  id: 1,
+  status: 'waiting',
+  started_at: null,
+  time_limit_seconds: 600,
+  decay_per_second: 1,
+  active_question_count: 3,
+  updated_at: new Date().toISOString(),
+};
+
+export interface AwardBreakdown {
+  basePoints: number;
+  elapsedSeconds: number;
+  awarded: number;
+  timedOut: boolean;
 }
 

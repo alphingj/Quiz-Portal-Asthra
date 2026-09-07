@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
-import type { LeaderboardEntry, Question } from '../types';
+import type { LeaderboardEntry, Question, CompetitionSettings } from '../types';
+import { DEFAULT_COMPETITION_SETTINGS } from '../types';
 import { store } from '../services/store';
 import { soundManager } from '../services/audio';
 import { getSupabase } from '../services/supabaseClient';
@@ -35,6 +36,7 @@ export const LiveLeaderboard: React.FC<LiveLeaderboardProps> = ({
 }) => {
   const [entries, setEntries] = useState<LeaderboardEntry[]>([]);
   const [questions, setQuestions] = useState<Question[]>([]);
+  const [compSettings, setCompSettings] = useState<CompetitionSettings>({ ...DEFAULT_COMPETITION_SETTINGS });
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
   const [displayCount, setDisplayCount] = useState<number | 'all'>(3);
@@ -71,12 +73,14 @@ export const LiveLeaderboard: React.FC<LiveLeaderboardProps> = ({
   }, [isProjectorMode, onToggleProjectorMode]);
 
   const fetchLeaderboard = async () => {
-    const [list, qList] = await Promise.all([
+    const [list, qList, settings] = await Promise.all([
       store.getLeaderboard(),
-      store.getQuestions()
+      store.getQuestions(),
+      store.getCompetitionSettings()
     ]);
     setEntries(list);
     setQuestions(qList);
+    setCompSettings(settings);
     setLoading(false);
     setLastRefreshed(new Date());
   };
@@ -109,6 +113,9 @@ export const LiveLeaderboard: React.FC<LiveLeaderboardProps> = ({
             fetchLeaderboard();
           })
           .on('postgres_changes', { event: '*', schema: 'public', table: 'submissions' }, () => {
+            fetchLeaderboard();
+          })
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'competition_settings' }, () => {
             fetchLeaderboard();
           })
           .subscribe();
@@ -167,24 +174,42 @@ export const LiveLeaderboard: React.FC<LiveLeaderboardProps> = ({
     onToggleProjectorMode?.(!isProjectorMode);
   };
 
+  // Active rounds in play: first N by order (admin-configurable count)
+  const activeCount = Math.max(1, Math.min(
+    compSettings.active_question_count,
+    Math.max(questions.length, 1)
+  ));
+  const activeQuestions = questions.slice(0, activeCount);
+  const totalPossibleScore = activeQuestions.reduce((acc, q) => acc + q.points, 0);
+
   // Real contest metrics computed strictly from active participants
   const totalParticipants = activeEntries.length;
   const completedCount = activeEntries.filter((e) => e.completed).length;
-  const totalQuestionsCount = questions.length > 0 ? questions.length : 3;
-  const totalFlagsSolved = activeEntries.reduce((acc, curr) => acc + curr.current_question_index, 0);
+  const totalQuestionsCount = activeCount;
+  const totalFlagsSolved = activeEntries.reduce((acc, curr) => acc + Math.min(curr.current_question_index, activeCount), 0);
   const totalPossibleFlags = totalParticipants * totalQuestionsCount;
   const clearPercentage = totalParticipants > 0 ? Math.round((completedCount / totalParticipants) * 100) : 0;
   const flagProgressPercentage = totalPossibleFlags > 0 ? Math.round((totalFlagsSolved / totalPossibleFlags) * 100) : 0;
   const fastestBreaker = activeEntries.find((e) => e.completed);
 
-  const f1Winner = activeEntries.find(e => e.current_question_index >= 1);
-  const f2Winner = activeEntries.find(e => e.current_question_index >= 2);
-  const f3Winner = activeEntries.find(e => e.completed);
+  // Dynamic per-flag labels + first solvers, one slot per active round.
+  // Solved check: index past the round (completed implies past the last one).
+  const flagLabels: string[] = activeQuestions.map((q, i) =>
+    i === activeQuestions.length - 1
+      ? `F${i + 1}: ROOT`
+      : `F${i + 1}: ${q.cipher_type.split(' ')[0].toUpperCase()}`
+  );
+  const flagWinners: (LeaderboardEntry | undefined)[] = activeQuestions.map((_, i) =>
+    activeEntries.find(e => e.current_question_index >= i + 1)
+  );
+  const solvedFlagsFor = (entry: LeaderboardEntry): boolean[] =>
+    activeQuestions.map((_, i) => entry.current_question_index >= i + 1 || entry.completed);
 
-  // Dynamic flag titles from real questions
-  const f1Label = questions[0] ? `F1: ${questions[0].cipher_type.split(' ')[0].toUpperCase()}` : 'F1: CAESAR';
-  const f2Label = questions[1] ? `F2: ${questions[1].cipher_type.split(' ')[0].toUpperCase()}` : 'F2: HEX';
-  const f3Label = questions[2] ? `F3: ROOT` : 'F3: ROOT';
+  const statusBadge = compSettings.status === 'live'
+    ? { text: '● LIVE', cls: 'cyber-badge-green' }
+    : compSettings.status === 'ended'
+    ? { text: '■ ENDED', cls: 'cyber-badge-red' }
+    : { text: '○ WAITING', cls: 'cyber-badge-amber' };
 
   // =========================================================================
   // DEDICATED TERMINAL-STYLE TELEMETRY UI (STAGE PROJECTOR MODE)
@@ -253,16 +278,32 @@ export const LiveLeaderboard: React.FC<LiveLeaderboardProps> = ({
                 <span style={{
                   fontSize: '0.68rem',
                   padding: '2px 8px',
-                  background: 'rgba(0, 255, 136, 0.12)',
-                  color: 'var(--phosphor-green)',
-                  border: '1px solid rgba(0, 255, 136, 0.4)',
+                  background: compSettings.status === 'live'
+                    ? 'rgba(0, 255, 136, 0.12)'
+                    : compSettings.status === 'ended'
+                    ? 'rgba(255, 51, 102, 0.12)'
+                    : 'rgba(245, 158, 11, 0.12)',
+                  color: compSettings.status === 'live'
+                    ? 'var(--phosphor-green)'
+                    : compSettings.status === 'ended'
+                    ? 'var(--neon-red)'
+                    : 'var(--warning-amber)',
+                  border: `1px solid ${compSettings.status === 'live'
+                    ? 'rgba(0, 255, 136, 0.4)'
+                    : compSettings.status === 'ended'
+                    ? 'rgba(255, 51, 102, 0.4)'
+                    : 'rgba(245, 158, 11, 0.4)'}`,
                   borderRadius: '2px',
                   display: 'inline-flex',
                   alignItems: 'center',
                   gap: '5px'
                 }}>
-                  <span className="telemetry-blink" style={{ width: '6px', height: '6px', borderRadius: '50%', background: 'var(--phosphor-green)' }} />
-                  LIVE OPERATIONAL
+                  <span className="telemetry-blink" style={{ width: '6px', height: '6px', borderRadius: '50%', background: 'currentColor' }} />
+                  {compSettings.status === 'live'
+                    ? `LIVE OPERATIONAL • ${activeCount} ROUNDS`
+                    : compSettings.status === 'ended'
+                    ? 'COMPETITION ENDED'
+                    : 'STANDBY • AWAITING START'}
                 </span>
               </div>
             </div>
@@ -425,7 +466,7 @@ export const LiveLeaderboard: React.FC<LiveLeaderboardProps> = ({
               {fastestBreaker ? formatTime(fastestBreaker.time_taken_seconds) : '--:--'}
             </div>
             <div style={{ fontSize: '0.68rem', color: 'var(--warning-amber)', marginTop: '2px', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>
-              HACKER: {fastestBreaker ? fastestBreaker.team_name : f1Winner ? `${f1Winner.team_name} (F1)` : 'AWAITING SOLVE'}
+              HACKER: {fastestBreaker ? fastestBreaker.team_name : flagWinners[0] ? `${flagWinners[0].team_name} (F1)` : 'AWAITING SOLVE'}
             </div>
           </div>
 
@@ -439,7 +480,7 @@ export const LiveLeaderboard: React.FC<LiveLeaderboardProps> = ({
               {clearPercentage}% <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>OF CONTESTANTS</span>
             </div>
             <div style={{ fontSize: '0.68rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
-              FULL 3-ROUND COMPROMISES: {completedCount}
+              FULL {activeCount}-ROUND COMPROMISES: {completedCount}
             </div>
           </div>
         </div>
@@ -471,7 +512,7 @@ export const LiveLeaderboard: React.FC<LiveLeaderboardProps> = ({
             <span style={{ color: 'var(--phosphor-green)' }}>&gt;</span> {
               activeEntries.length === 0
                 ? '[SYS_READY] Telemetry node active • Awaiting participant registrations from event desk • 0 squads currently on-grid '
-                : `[TELEMETRY] ${totalFlagsSolved} of ${totalPossibleFlags} flags cracked across ${totalParticipants} active teams • ${f1Winner ? `Flag 1 breached by ${f1Winner.team_name} • ` : ''}${activeEntries[0] ? `Rank #1 held by ${activeEntries[0].team_name} (${activeEntries[0].score} PTS) • ` : ''}Anti-cheat proctoring active `
+                : `[TELEMETRY] ${totalFlagsSolved} of ${totalPossibleFlags} flags cracked across ${totalParticipants} active teams • ${flagWinners[0] ? `Flag 1 breached by ${flagWinners[0].team_name} • ` : ''}${activeEntries[0] ? `Rank #1 held by ${activeEntries[0].team_name} (${activeEntries[0].score} PTS) • ` : ''}Anti-cheat proctoring active `
             }<span className="telemetry-blink">_</span>
           </div>
         </div>
@@ -502,7 +543,7 @@ export const LiveLeaderboard: React.FC<LiveLeaderboardProps> = ({
                 }}>
                   <th style={{ padding: '14px 20px', width: '90px' }}>[RANK]</th>
                   <th style={{ padding: '14px 20px' }}>[SQUAD_CALLSIGN // OPERATOR]</th>
-                  <th style={{ padding: '14px 20px' }}>[CIPHER_FLAGS: F1 / F2 / F3]</th>
+                  <th style={{ padding: '14px 20px' }}>[CIPHER_FLAGS: {flagLabels.map((_, i) => `F${i + 1}`).join(' / ') || 'F1'}]</th>
                   <th style={{ padding: '14px 20px', textAlign: 'right', width: '130px' }}>[CHRONO]</th>
                   <th style={{ padding: '14px 20px', width: '220px' }}>[INTRUSION_STATE]</th>
                   <th style={{ padding: '14px 24px', textAlign: 'right', width: '140px' }}>[SCORE]</th>
@@ -523,9 +564,7 @@ export const LiveLeaderboard: React.FC<LiveLeaderboardProps> = ({
                 ) : (
                   displayedEntries.map((item) => {
                     const isCurrent = item.id === currentParticipantId;
-                    const f1Solved = item.current_question_index >= 1;
-                    const f2Solved = item.current_question_index >= 2;
-                    const f3Solved = item.completed;
+                    const solved = solvedFlagsFor(item);
 
                     const rankStyle = item.rank === 1
                       ? { color: 'var(--warning-amber)', borderColor: 'var(--warning-amber)', bg: 'rgba(245, 158, 11, 0.15)' }
@@ -596,18 +635,14 @@ export const LiveLeaderboard: React.FC<LiveLeaderboardProps> = ({
                           </div>
                         </td>
 
-                        {/* Flags */}
+                        {/* Flags (one block per active round) */}
                         <td style={{ padding: '16px 20px' }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <span className={`telemetry-flag-block ${f1Solved ? 'telemetry-flag-solved' : 'telemetry-flag-locked'}`}>
-                              {f1Solved ? `██ ${f1Label}` : `░░ ${f1Label}`}
-                            </span>
-                            <span className={`telemetry-flag-block ${f2Solved ? 'telemetry-flag-solved' : 'telemetry-flag-locked'}`}>
-                              {f2Solved ? `██ ${f2Label}` : `░░ ${f2Label}`}
-                            </span>
-                            <span className={`telemetry-flag-block ${f3Solved ? 'telemetry-flag-solved' : 'telemetry-flag-locked'}`}>
-                              {f3Solved ? `██ ${f3Label}` : `░░ ${f3Label}`}
-                            </span>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                            {flagLabels.map((label, i) => (
+                              <span key={label} className={`telemetry-flag-block ${solved[i] ? 'telemetry-flag-solved' : 'telemetry-flag-locked'}`}>
+                                {solved[i] ? `██ ${label}` : `░░ ${label}`}
+                              </span>
+                            ))}
                           </div>
                         </td>
 
@@ -635,7 +670,7 @@ export const LiveLeaderboard: React.FC<LiveLeaderboardProps> = ({
                               borderRadius: '2px'
                             }}>
                               <ShieldCheck size={13} />
-                              [★ SYSTEM_ROOTED 3/3]
+                              [★ SYSTEM_ROOTED {activeCount}/{activeCount}]
                             </span>
                           ) : (
                             <span style={{
@@ -760,6 +795,9 @@ export const LiveLeaderboard: React.FC<LiveLeaderboardProps> = ({
               </span>
               <span className="cyber-badge cyber-badge-amber">
                 <Flame size={12} /> ASTHRA 11.0 OFFICIAL
+              </span>
+              <span className={`cyber-badge ${statusBadge.cls}`}>
+                {statusBadge.text} • {activeCount} ROUND{activeCount === 1 ? '' : 'S'}
               </span>
             </div>
           </div>
@@ -942,39 +980,28 @@ export const LiveLeaderboard: React.FC<LiveLeaderboardProps> = ({
             <Flame size={15} /> FIRST BLOOD FEED:
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: '14px', flexWrap: 'nowrap', fontSize: '0.78rem' }}>
-            {/* Flag 1 First Blood */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' }}>
-              <span className="thm-first-blood-tag">{f1Label.split(':')[0]}</span>
-              <span style={{ color: '#ffffff', fontWeight: 600 }}>{f1Winner ? f1Winner.team_name : 'Unclaimed'}</span>
-              <span style={{ color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: '0.72rem' }}>
-                ({f1Winner ? formatTime(f1Winner.time_taken_seconds) : '--'})
-              </span>
-            </div>
-
-            <span style={{ color: 'rgba(255, 255, 255, 0.15)' }}>•</span>
-
-            {/* Flag 2 First Blood */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' }}>
-              <span className="thm-first-blood-tag">{f2Label.split(':')[0]}</span>
-              <span style={{ color: '#ffffff', fontWeight: 600 }}>{f2Winner ? f2Winner.team_name : 'Unclaimed'}</span>
-              <span style={{ color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: '0.72rem' }}>
-                ({f2Winner ? formatTime(f2Winner.time_taken_seconds) : '--'})
-              </span>
-            </div>
-
-            <span style={{ color: 'rgba(255, 255, 255, 0.15)' }}>•</span>
-
-            {/* Flag 3 Master Breaker */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' }}>
-              <span className="thm-first-blood-tag" style={{ background: 'var(--phosphor-green-subtle)', color: 'var(--phosphor-green)', borderColor: 'var(--phosphor-green-border)' }}>
-                {f3Label}
-              </span>
-              <span style={{ color: '#ffffff', fontWeight: 600 }}>{f3Winner ? f3Winner.team_name : 'Unclaimed'}</span>
-              <span style={{ color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: '0.72rem' }}>
-                ({f3Winner ? formatTime(f3Winner.time_taken_seconds) : '--'})
-              </span>
-            </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '14px', flexWrap: 'wrap', fontSize: '0.78rem' }}>
+            {flagLabels.map((label, i) => {
+              const winner = flagWinners[i];
+              const isLast = i === flagLabels.length - 1;
+              return (
+                <span key={label} style={{ display: 'inline-flex', alignItems: 'center', gap: '14px' }}>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' }}>
+                    <span
+                      className="thm-first-blood-tag"
+                      style={isLast ? { background: 'var(--phosphor-green-subtle)', color: 'var(--phosphor-green)', borderColor: 'var(--phosphor-green-border)' } : undefined}
+                    >
+                      {isLast ? label : label.split(':')[0]}
+                    </span>
+                    <span style={{ color: '#ffffff', fontWeight: 600 }}>{winner ? winner.team_name : 'Unclaimed'}</span>
+                    <span style={{ color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: '0.72rem' }}>
+                      ({winner ? formatTime(winner.time_taken_seconds) : '--'})
+                    </span>
+                  </span>
+                  {!isLast && <span style={{ color: 'rgba(255, 255, 255, 0.15)' }}>•</span>}
+                </span>
+              );
+            })}
           </div>
         </div>
       )}
@@ -1199,7 +1226,7 @@ export const LiveLeaderboard: React.FC<LiveLeaderboardProps> = ({
               }}>
                 <th style={{ padding: '16px 20px', width: '80px' }}>Rank</th>
                 <th style={{ padding: '16px 20px' }}>Hacker / Squad</th>
-                <th style={{ padding: '16px 20px', width: '280px' }}>Flag Matrix (3 Flags)</th>
+                <th style={{ padding: '16px 20px', width: '280px' }}>Flag Matrix ({activeCount} Flag{activeCount === 1 ? '' : 's'} • {totalPossibleScore} PTS)</th>
                 <th style={{ padding: '16px 20px', width: '130px', textAlign: 'right' }}>Time</th>
                 <th style={{ padding: '16px 20px', width: '180px' }}>Intrusion State</th>
                 <th style={{ padding: '16px 24px', width: '130px', textAlign: 'right' }}>Score</th>
@@ -1215,9 +1242,7 @@ export const LiveLeaderboard: React.FC<LiveLeaderboardProps> = ({
               ) : (
                 displayedEntries.map((item) => {
                   const isCurrent = currentParticipantId === item.id;
-                  const f1Solved = item.current_question_index >= 1;
-                  const f2Solved = item.current_question_index >= 2;
-                  const f3Solved = item.completed;
+                  const solved = solvedFlagsFor(item);
 
                   return (
                     <tr
@@ -1277,35 +1302,23 @@ export const LiveLeaderboard: React.FC<LiveLeaderboardProps> = ({
                         </div>
                       </td>
 
-                      {/* TryHackMe 3-Flag Progress Matrix */}
+                      {/* TryHackMe Flag Progress Matrix (one badge per active round) */}
                       <td style={{ padding: '16px 20px' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          {/* Flag 1 */}
-                          <span 
-                            title={f1Solved ? 'Flag 1: Caesar Shift [SOLVED]' : 'Flag 1: Caesar Shift [LOCKED]'}
-                            className={`thm-flag-badge ${f1Solved ? 'thm-flag-solved' : 'thm-flag-locked'}`}
-                          >
-                            {f1Solved ? <CheckCircle2 size={11} /> : <Lock size={11} />}
-                            F1
-                          </span>
-
-                          {/* Flag 2 */}
-                          <span 
-                            title={f2Solved ? 'Flag 2: Hex Stream [SOLVED]' : 'Flag 2: Hex Stream [LOCKED]'}
-                            className={`thm-flag-badge ${f2Solved ? 'thm-flag-solved' : 'thm-flag-locked'}`}
-                          >
-                            {f2Solved ? <CheckCircle2 size={11} /> : <Lock size={11} />}
-                            F2
-                          </span>
-
-                          {/* Flag 3 */}
-                          <span 
-                            title={f3Solved ? 'Flag 3: Vigenère Citadel [SOLVED]' : 'Flag 3: Vigenère Citadel [LOCKED]'}
-                            className={`thm-flag-badge ${f3Solved ? 'thm-flag-solved' : 'thm-flag-locked'}`}
-                          >
-                            {f3Solved ? <CheckCircle2 size={11} /> : <Lock size={11} />}
-                            F3: ROOT
-                          </span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                          {flagLabels.map((label, i) => {
+                            const isLast = i === flagLabels.length - 1;
+                            const shortTag = isLast ? `F${i + 1}: ROOT` : `F${i + 1}`;
+                            return (
+                              <span
+                                key={label}
+                                title={solved[i] ? `${label} [SOLVED]` : `${label} [LOCKED]`}
+                                className={`thm-flag-badge ${solved[i] ? 'thm-flag-solved' : 'thm-flag-locked'}`}
+                              >
+                                {solved[i] ? <CheckCircle2 size={11} /> : <Lock size={11} />}
+                                {shortTag}
+                              </span>
+                            );
+                          })}
                         </div>
                       </td>
 
@@ -1328,7 +1341,7 @@ export const LiveLeaderboard: React.FC<LiveLeaderboardProps> = ({
                         {item.completed ? (
                           <span className="thm-flag-badge thm-flag-solved" style={{ fontSize: '0.72rem' }}>
                             <ShieldCheck size={12} />
-                            SYSTEM ROOTED (3/3)
+                            SYSTEM ROOTED ({activeCount}/{activeCount})
                           </span>
                         ) : (
                           <span className="thm-flag-badge" style={{

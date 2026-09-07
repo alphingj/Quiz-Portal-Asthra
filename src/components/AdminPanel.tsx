@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
-import type { Participant, Question, CheatingWarning } from '../types';
+import type { Participant, Question, CheatingWarning, CompetitionSettings } from '../types';
+import { DEFAULT_COMPETITION_SETTINGS } from '../types';
 import { store } from '../services/store';
 import { 
   getSupabaseConfig, 
@@ -29,7 +30,12 @@ import {
   Key,
   Check,
   Copy,
-  Lock
+  Lock,
+  Play,
+  Square,
+  Plus,
+  Timer,
+  Flag
 } from 'lucide-react';
 
 // Local-dev fallback only (used when /api/admin-verify is unreachable,
@@ -65,6 +71,23 @@ export const AdminPanel: React.FC = () => {
   const [editForm, setEditForm] = useState<Question | null>(null);
   const [savingQuestion, setSavingQuestion] = useState(false);
   const [questionFeedback, setQuestionFeedback] = useState<string | null>(null);
+
+  // Add-question form state
+  const [showAddQuestion, setShowAddQuestion] = useState(false);
+  const [addForm, setAddForm] = useState({
+    title: '',
+    cipher_type: '',
+    ciphertext: '',
+    clue: '',
+    answer: '',
+    points: 100,
+    difficulty: 'Beginner' as 'Beginner' | 'Intermediate' | 'Advanced',
+  });
+  const [addingQuestion, setAddingQuestion] = useState(false);
+
+  // Timed-competition settings + controls
+  const [compSettings, setCompSettings] = useState<CompetitionSettings>({ ...DEFAULT_COMPETITION_SETTINGS });
+  const [compBusy, setCompBusy] = useState(false);
 
   // Warnings state & timeout penalties
   const [warnings, setWarnings] = useState<CheatingWarning[]>([]);
@@ -132,6 +155,19 @@ export const AdminPanel: React.FC = () => {
     setQuestions(qList);
   };
 
+  const refreshCompSettings = async () => {
+    const s = await store.getCompetitionSettings();
+    // Clamp active count to what actually exists so the UI never shows an
+    // impossible number after deletions.
+    const qList = await store.getQuestions();
+    if (s.active_question_count > qList.length && qList.length > 0) {
+      const fixed = await store.updateCompetitionSettings({ active_question_count: qList.length });
+      setCompSettings(fixed);
+    } else {
+      setCompSettings(s);
+    }
+  };
+
   const refreshWarnings = async () => {
     setLoadingWarnings(true);
     const list = await store.getWarnings();
@@ -145,6 +181,7 @@ export const AdminPanel: React.FC = () => {
     refreshRoster();
     refreshQuestions();
     refreshWarnings();
+    refreshCompSettings();
 
     // Realtime Supabase subscription for Admin Panel
     const client = getSupabase();
@@ -162,6 +199,9 @@ export const AdminPanel: React.FC = () => {
           .on('postgres_changes', { event: '*', schema: 'public', table: 'questions' }, () => {
             refreshQuestions();
           })
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'competition_settings' }, () => {
+            refreshCompSettings();
+          })
           .subscribe();
       } catch (err) {
         console.warn('Realtime admin subscription failed:', err);
@@ -173,6 +213,7 @@ export const AdminPanel: React.FC = () => {
       refreshRoster();
       refreshQuestions();
       refreshWarnings();
+      refreshCompSettings();
     };
     window.addEventListener('asthra_data_update', handleLocalUpdate);
     window.addEventListener('storage', handleLocalUpdate);
@@ -369,6 +410,151 @@ export const AdminPanel: React.FC = () => {
       await store.clearWarnings();
       refreshWarnings();
       refreshRoster();
+    }
+  };
+
+  const handleDeleteQuestion = async (q: Question) => {
+    if (questions.length <= 1) {
+      soundManager.playError();
+      setQuestionFeedback('Cannot delete the last remaining question. At least one round must exist.');
+      setTimeout(() => setQuestionFeedback(null), 4000);
+      return;
+    }
+    const liveWarn = compSettings.status === 'live'
+      ? ' The competition is LIVE — remaining rounds will be renumbered and participant progress clamped.'
+      : '';
+    if (!confirm(`Entirely delete "${q.title}" (Round ${q.round_number}) including its flag and points?${liveWarn}`)) return;
+    soundManager.playKeypress();
+    try {
+      const updated = await store.deleteQuestion(q.id);
+      setQuestions(updated);
+      await refreshCompSettings();
+      soundManager.playSuccess();
+      setQuestionFeedback(`"${q.title}" deleted. Remaining rounds renumbered.`);
+      setTimeout(() => setQuestionFeedback(null), 4000);
+    } catch (err: any) {
+      soundManager.playError();
+      setQuestionFeedback(`Error deleting question: ${err.message || 'Failed'}`);
+    }
+  };
+
+  const handleAddQuestion = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!addForm.title.trim() || !addForm.cipher_type.trim() || !addForm.ciphertext.trim() || !addForm.answer.trim()) {
+      soundManager.playError();
+      setQuestionFeedback('Title, cipher type, ciphertext and expected answer are required.');
+      return;
+    }
+    setAddingQuestion(true);
+    soundManager.playKeypress();
+    try {
+      const maxOrder = questions.reduce((m, q) => Math.max(m, q.order_index), 0);
+      const maxId = questions.reduce((m, q) => Math.max(m, q.id), 0);
+      // New id: for Supabase SERIAL tables omit id and let the DB assign it;
+      // for the local fallback use a timestamp-based id.
+      const payload: Question = {
+        id: maxId + 1,
+        round_number: maxOrder + 1,
+        title: addForm.title.trim(),
+        cipher_type: addForm.cipher_type.trim(),
+        ciphertext: addForm.ciphertext.trim(),
+        clue: addForm.clue.trim() ? addForm.clue.trim() : null,
+        answer: addForm.answer.trim(),
+        points: Math.max(1, Math.floor(Number(addForm.points) || 100)),
+        difficulty: addForm.difficulty,
+        order_index: maxOrder + 1,
+      };
+      const supabase = getSupabase();
+      if (supabase) {
+        const { id: _omitId, ...dbPayload } = payload;
+        const { data, error } = await supabase.from('questions').insert([dbPayload]).select().single();
+        if (error) throw new Error(error.message);
+        await store.saveQuestion(data || payload);
+      } else {
+        payload.id = Date.now();
+        await store.saveQuestion(payload);
+      }
+      const updated = await store.getQuestions();
+      setQuestions(updated);
+      soundManager.playSuccess();
+      setQuestionFeedback(`"${payload.title}" added as Round ${payload.round_number}!`);
+      setShowAddQuestion(false);
+      setAddForm({ title: '', cipher_type: '', ciphertext: '', clue: '', answer: '', points: 100, difficulty: 'Beginner' });
+      setTimeout(() => setQuestionFeedback(null), 4000);
+    } catch (err: any) {
+      soundManager.playError();
+      setQuestionFeedback(`Error adding question: ${err.message || 'Failed'}`);
+    } finally {
+      setAddingQuestion(false);
+    }
+  };
+
+  const handleActiveCountChange = async (count: number) => {
+    if (!Number.isFinite(count)) return;
+    const clamped = Math.min(Math.max(1, Math.floor(count)), Math.max(1, questions.length));
+    soundManager.playKeypress();
+    const next = await store.updateCompetitionSettings({ active_question_count: clamped });
+    setCompSettings(next);
+    refreshRoster();
+  };
+
+  const handleTimingChange = async (field: 'time_limit_seconds' | 'decay_per_second', value: number) => {
+    if (!Number.isFinite(value)) return;
+    soundManager.playKeypress();
+    const next = await store.updateCompetitionSettings({ [field]: value } as Partial<CompetitionSettings>);
+    setCompSettings(next);
+  };
+
+  const handleStartCompetition = async () => {
+    if (!confirm(`START the competition now?\n\n- Status goes LIVE for all participants\n- ALL scores and progress reset to zero\n- Per-question timer: ${compSettings.time_limit_seconds}s, decay: -${compSettings.decay_per_second} pt/s\n- Active rounds: ${compSettings.active_question_count}`)) return;
+    setCompBusy(true);
+    soundManager.playKeypress();
+    try {
+      const next = await store.startCompetition();
+      setCompSettings(next);
+      refreshRoster();
+      soundManager.playSuccess();
+      setQuestionFeedback('Competition is LIVE! All participant progress has been reset.');
+      setTimeout(() => setQuestionFeedback(null), 5000);
+    } catch (err: any) {
+      soundManager.playError();
+      setQuestionFeedback(`Error starting competition: ${err.message || 'Failed'}`);
+    } finally {
+      setCompBusy(false);
+    }
+  };
+
+  const handleEndCompetition = async () => {
+    if (!confirm('END the competition? The quiz terminal will lock for all participants.')) return;
+    setCompBusy(true);
+    soundManager.playKeypress();
+    try {
+      const next = await store.endCompetition();
+      setCompSettings(next);
+      soundManager.playSuccess();
+      setQuestionFeedback('Competition ended. Quiz terminals are locked.');
+      setTimeout(() => setQuestionFeedback(null), 5000);
+    } catch (err: any) {
+      soundManager.playError();
+      setQuestionFeedback(`Error ending competition: ${err.message || 'Failed'}`);
+    } finally {
+      setCompBusy(false);
+    }
+  };
+
+  const handleBackToWaiting = async () => {
+    if (!confirm('Move competition back to WAITING? Participants will see the waiting room. Scores are NOT reset.')) return;
+    setCompBusy(true);
+    soundManager.playKeypress();
+    try {
+      const next = await store.resetCompetitionToWaiting();
+      setCompSettings(next);
+      soundManager.playSuccess();
+    } catch (err: any) {
+      soundManager.playError();
+      setQuestionFeedback(`Error: ${err.message || 'Failed'}`);
+    } finally {
+      setCompBusy(false);
     }
   };
 
@@ -820,7 +1006,9 @@ export const AdminPanel: React.FC = () => {
                         </span>
                       </td>
                       <td style={{ padding: '14px 16px', fontFamily: 'var(--font-mono)' }}>
-                        {p.completed ? '3 / 3' : `${p.current_question_index + 1} / 3`}
+                        {p.completed
+                          ? `${compSettings.active_question_count} / ${compSettings.active_question_count}`
+                          : `${Math.min(p.current_question_index + 1, compSettings.active_question_count)} / ${compSettings.active_question_count}`}
                       </td>
                       <td style={{ padding: '14px 16px', fontWeight: 800, color: 'var(--neon-green)', fontFamily: 'var(--font-mono)' }}>
                         {p.score} PTS
@@ -909,7 +1097,137 @@ export const AdminPanel: React.FC = () => {
                 Edit ciphers, clues, points, and expected decryption answers. Changes persist directly to Supabase and are verified live when participants submit answers.
               </p>
             </div>
-            <span className="cyber-badge cyber-badge-green">{questions.length} Active Challenge Rounds</span>
+            <span className="cyber-badge cyber-badge-green">{questions.length} Total Rounds • {compSettings.active_question_count} In Play</span>
+          </div>
+
+          {/* COMPETITION CONTROL: timed mode, rounds in play, start/end */}
+          <div style={{
+            background: 'rgba(5, 8, 17, 0.85)',
+            border: `1px solid ${compSettings.status === 'live' ? 'rgba(0, 255, 157, 0.45)' : compSettings.status === 'ended' ? 'rgba(255, 51, 102, 0.45)' : 'rgba(255, 176, 32, 0.45)'}`,
+            borderRadius: 'var(--radius-md)',
+            padding: '20px 22px',
+            marginBottom: '20px'
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px', marginBottom: '16px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <Timer size={20} color={compSettings.status === 'live' ? 'var(--neon-green)' : 'var(--accent-amber)'} />
+                <strong style={{ fontSize: '1.05rem', color: '#ffffff' }}>Competition Control</strong>
+                <span className={`cyber-badge ${
+                  compSettings.status === 'live' ? 'cyber-badge-green'
+                  : compSettings.status === 'ended' ? 'cyber-badge-red'
+                  : 'cyber-badge-amber'
+                }`}>
+                  {compSettings.status === 'live' ? '● LIVE' : compSettings.status === 'ended' ? '■ ENDED' : '○ WAITING'}
+                </span>
+                {compSettings.started_at && (
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                    started {new Date(compSettings.started_at).toLocaleString()}
+                  </span>
+                )}
+              </div>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                {compSettings.status !== 'live' && (
+                  <button
+                    onClick={handleStartCompetition}
+                    disabled={compBusy || questions.length === 0}
+                    className="cyber-btn cyber-btn-primary"
+                    style={{ fontSize: '0.85rem', padding: '8px 18px' }}
+                  >
+                    <Play size={15} />
+                    {compBusy ? 'Working...' : 'Start Competition'}
+                  </button>
+                )}
+                {compSettings.status === 'live' && (
+                  <button
+                    onClick={handleEndCompetition}
+                    disabled={compBusy}
+                    className="cyber-btn"
+                    style={{ fontSize: '0.85rem', padding: '8px 18px', border: '1px solid var(--neon-red)', color: 'var(--neon-red)' }}
+                  >
+                    <Square size={15} />
+                    {compBusy ? 'Working...' : 'End Competition'}
+                  </button>
+                )}
+                {compSettings.status === 'ended' && (
+                  <button
+                    onClick={handleBackToWaiting}
+                    disabled={compBusy}
+                    className="cyber-btn cyber-btn-ghost"
+                    style={{ fontSize: '0.85rem', padding: '8px 18px' }}
+                  >
+                    <RotateCcw size={15} />
+                    Back to Waiting
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '14px' }}>
+              <div>
+                <label style={{ display: 'block', fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '6px', fontWeight: 700, letterSpacing: '0.05em' }}>
+                  <Flag size={12} style={{ verticalAlign: '-2px', marginRight: '4px' }} />
+                  ROUNDS IN PLAY (1–{Math.max(1, questions.length)})
+                </label>
+                <input
+                  type="number"
+                  min={1}
+                  max={Math.max(1, questions.length)}
+                  value={compSettings.active_question_count}
+                  onChange={(e) => handleActiveCountChange(parseInt(e.target.value, 10))}
+                  className="cyber-input cyber-input-mono"
+                  style={{ width: '100%', padding: '10px 14px', fontSize: '1rem' }}
+                />
+                <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '4px' }}>
+                  Quiz + leaderboard use the first N rounds. Shrinking N completes anyone past it.
+                </div>
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '6px', fontWeight: 700, letterSpacing: '0.05em' }}>
+                  <Clock size={12} style={{ verticalAlign: '-2px', marginRight: '4px' }} />
+                  TIME PER QUESTION (SECONDS)
+                </label>
+                <input
+                  type="number"
+                  min={30}
+                  step={10}
+                  value={compSettings.time_limit_seconds}
+                  onChange={(e) => handleTimingChange('time_limit_seconds', parseInt(e.target.value, 10))}
+                  className="cyber-input cyber-input-mono"
+                  style={{ width: '100%', padding: '10px 14px', fontSize: '1rem' }}
+                />
+                <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '4px' }}>
+                  After this each round locks to Skip-only. 600s = 10 min.
+                </div>
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '6px', fontWeight: 700, letterSpacing: '0.05em' }}>
+                  POINT DECAY (PTS / SECOND)
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  step={1}
+                  value={compSettings.decay_per_second}
+                  onChange={(e) => handleTimingChange('decay_per_second', parseInt(e.target.value, 10))}
+                  className="cyber-input cyber-input-mono"
+                  style={{ width: '100%', padding: '10px 14px', fontSize: '1rem' }}
+                />
+                <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '4px' }}>
+                  −1/s drains a 600-pt round in exactly 10 minutes.
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '16px' }}>
+            <button
+              onClick={() => { soundManager.playKeypress(); setShowAddQuestion(true); setQuestionFeedback(null); }}
+              className="cyber-btn cyber-btn-primary"
+              style={{ fontSize: '0.85rem', padding: '8px 18px' }}
+            >
+              <Plus size={15} />
+              Add New Question &amp; Flag
+            </button>
           </div>
 
           {questionFeedback && (
@@ -961,6 +1279,15 @@ export const AdminPanel: React.FC = () => {
                     >
                       <Edit3 size={14} />
                       Edit Question &amp; Flag
+                    </button>
+                    <button
+                      onClick={() => handleDeleteQuestion(q)}
+                      className="cyber-btn"
+                      title="Entirely delete this question, its flag and points"
+                      style={{ fontSize: '0.8rem', padding: '6px 14px', border: '1px solid var(--neon-red)', color: 'var(--neon-red)' }}
+                    >
+                      <Trash2 size={14} />
+                      Delete
                     </button>
                   </div>
                 </div>
@@ -1186,6 +1513,178 @@ export const AdminPanel: React.FC = () => {
                     >
                       <Save size={16} />
                       {savingQuestion ? 'Saving Changes...' : 'Save & Sync to Supabase'}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+
+          {/* Add Question Modal */}
+          {showAddQuestion && (
+            <div style={{
+              position: 'fixed',
+              inset: 0,
+              backgroundColor: 'rgba(3, 7, 18, 0.85)',
+              backdropFilter: 'blur(10px)',
+              WebkitBackdropFilter: 'blur(10px)',
+              zIndex: 1000,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: '20px'
+            }}>
+              <div className="glass-card" style={{
+                maxWidth: '680px',
+                width: '100%',
+                maxHeight: '90vh',
+                overflowY: 'auto',
+                background: 'linear-gradient(180deg, rgba(14, 20, 36, 0.98) 0%, rgba(7, 12, 22, 0.99) 100%)',
+                border: '1px solid var(--neon-green)',
+                padding: '28px',
+                borderRadius: 'var(--radius-md)',
+                boxShadow: '0 0 40px rgba(0, 255, 157, 0.25)'
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <Plus size={20} color="var(--neon-green)" />
+                    <h3 style={{ fontSize: '1.25rem', color: '#ffffff' }}>
+                      Add Round {questions.length + 1} — New Question &amp; Flag
+                    </h3>
+                  </div>
+                  <button
+                    onClick={() => setShowAddQuestion(false)}
+                    style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}
+                  >
+                    <X size={20} />
+                  </button>
+                </div>
+
+                <form onSubmit={handleAddQuestion}>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '14px', marginBottom: '16px' }}>
+                    <div>
+                      <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>
+                        QUESTION TITLE *
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        placeholder="e.g. Round 4: The XOR Vault"
+                        value={addForm.title}
+                        onChange={(e) => setAddForm({ ...addForm, title: e.target.value })}
+                        className="cyber-input"
+                      />
+                    </div>
+
+                    <div>
+                      <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>
+                        CIPHER ALGORITHM TYPE *
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        placeholder="e.g. XOR Cipher"
+                        value={addForm.cipher_type}
+                        onChange={(e) => setAddForm({ ...addForm, cipher_type: e.target.value })}
+                        className="cyber-input"
+                      />
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px', marginBottom: '16px' }}>
+                    <div>
+                      <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>
+                        POINTS AWARDED *
+                      </label>
+                      <input
+                        type="number"
+                        min="1"
+                        required
+                        value={addForm.points}
+                        onChange={(e) => setAddForm({ ...addForm, points: Number(e.target.value) })}
+                        className="cyber-input cyber-input-mono"
+                      />
+                      <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '4px', display: 'block' }}>
+                        Full value if solved instantly; decays −{compSettings.decay_per_second}/s.
+                      </span>
+                    </div>
+
+                    <div>
+                      <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>
+                        DIFFICULTY LEVEL
+                      </label>
+                      <select
+                        value={addForm.difficulty}
+                        onChange={(e) => setAddForm({ ...addForm, difficulty: e.target.value as any })}
+                        className="cyber-input"
+                        style={{ background: '#0b1221', color: '#ffffff' }}
+                      >
+                        <option value="Beginner">Beginner</option>
+                        <option value="Intermediate">Intermediate</option>
+                        <option value="Advanced">Advanced</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div style={{ marginBottom: '16px' }}>
+                    <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>
+                      CIPHERTEXT (ENCRYPTED MESSAGE PRESENTED TO TEAMS) *
+                    </label>
+                    <textarea
+                      rows={3}
+                      required
+                      value={addForm.ciphertext}
+                      onChange={(e) => setAddForm({ ...addForm, ciphertext: e.target.value })}
+                      className="cyber-input cyber-input-mono"
+                      style={{ resize: 'vertical' }}
+                    />
+                  </div>
+
+                  <div style={{ marginBottom: '16px' }}>
+                    <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>
+                      TACTICAL CLUE (OPTIONAL - LEAVE BLANK TO OMIT CLUE)
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={addForm.clue}
+                      onChange={(e) => setAddForm({ ...addForm, clue: e.target.value })}
+                      className="cyber-input"
+                      style={{ resize: 'vertical' }}
+                    />
+                  </div>
+
+                  <div style={{ marginBottom: '24px' }}>
+                    <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--neon-green)', fontWeight: 700, marginBottom: '4px' }}>
+                      EXPECTED DECRYPTION ANSWER (FLAG FORMAT) *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. ASTHRA{SECRET_FLAG}"
+                      value={addForm.answer}
+                      onChange={(e) => setAddForm({ ...addForm, answer: e.target.value })}
+                      className="cyber-input cyber-input-mono"
+                      style={{ borderColor: 'var(--neon-green)', background: 'rgba(0, 255, 157, 0.05)', color: 'var(--neon-green)', fontWeight: 700 }}
+                    />
+                  </div>
+
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+                    <button
+                      type="button"
+                      onClick={() => setShowAddQuestion(false)}
+                      className="cyber-btn cyber-btn-ghost"
+                      style={{ padding: '10px 18px' }}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={addingQuestion}
+                      className="cyber-btn cyber-btn-primary"
+                      style={{ padding: '10px 22px' }}
+                    >
+                      <Plus size={16} />
+                      {addingQuestion ? 'Adding...' : 'Add Question & Sync'}
                     </button>
                   </div>
                 </form>

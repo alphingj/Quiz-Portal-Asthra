@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS public.participants (
     role TEXT DEFAULT 'participant' CHECK (role IN ('participant', 'moderator', 'admin')),
     started_at TIMESTAMPTZ DEFAULT NOW(),
     completed_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    current_question_started_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- Migration for existing deployments: add role column if missing
@@ -28,6 +29,17 @@ BEGIN
         WHERE table_schema = 'public' AND table_name = 'participants' AND column_name = 'role'
     ) THEN
         ALTER TABLE public.participants ADD COLUMN role TEXT DEFAULT 'participant' CHECK (role IN ('participant', 'moderator', 'admin'));
+    END IF;
+END $$;
+
+-- Migration for timed-competition mode: per-question start timestamp if missing
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'participants' AND column_name = 'current_question_started_at'
+    ) THEN
+        ALTER TABLE public.participants ADD COLUMN current_question_started_at TIMESTAMPTZ DEFAULT NOW();
     END IF;
 END $$;
 
@@ -66,11 +78,28 @@ CREATE TABLE IF NOT EXISTS public.warnings (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- 4b. Competition Settings (single-row table, id = 1 drives timed-competition mode)
+CREATE TABLE IF NOT EXISTS public.competition_settings (
+    id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    status TEXT DEFAULT 'waiting' CHECK (status IN ('waiting', 'live', 'ended')),
+    started_at TIMESTAMPTZ,
+    time_limit_seconds INTEGER DEFAULT 600,
+    decay_per_second INTEGER DEFAULT 1,
+    active_question_count INTEGER DEFAULT 3,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Seed the singleton settings row (safe to re-run)
+INSERT INTO public.competition_settings (id, status, time_limit_seconds, decay_per_second, active_question_count)
+VALUES (1, 'waiting', 600, 1, 3)
+ON CONFLICT (id) DO NOTHING;
+
 -- 5. Enable Row Level Security (RLS) & permissive policies for the event
 ALTER TABLE public.participants ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.questions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.submissions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.warnings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.competition_settings ENABLE ROW LEVEL SECURITY;
 
 -- Allow read and write for anon during competition
 -- (DROP first so the script is safe to re-run on an existing project)
@@ -104,13 +133,20 @@ CREATE POLICY "Allow public read on warnings" ON public.warnings FOR SELECT USIN
 CREATE POLICY "Allow public insert on warnings" ON public.warnings FOR INSERT WITH CHECK (true);
 CREATE POLICY "Allow public delete on warnings" ON public.warnings FOR DELETE USING (true);
 
+DROP POLICY IF EXISTS "Allow public read on competition_settings" ON public.competition_settings;
+DROP POLICY IF EXISTS "Allow public insert on competition_settings" ON public.competition_settings;
+DROP POLICY IF EXISTS "Allow public update on competition_settings" ON public.competition_settings;
+CREATE POLICY "Allow public read on competition_settings" ON public.competition_settings FOR SELECT USING (true);
+CREATE POLICY "Allow public insert on competition_settings" ON public.competition_settings FOR INSERT WITH CHECK (true);
+CREATE POLICY "Allow public update on competition_settings" ON public.competition_settings FOR UPDATE USING (true);
+
 -- 6. Enable Realtime Publications for live scoreboards
 -- (skips tables already in the publication, so re-runs are safe)
 DO $$
 DECLARE
     t TEXT;
 BEGIN
-    FOREACH t IN ARRAY ARRAY['participants', 'questions', 'submissions', 'warnings'] LOOP
+    FOREACH t IN ARRAY ARRAY['participants', 'questions', 'submissions', 'warnings', 'competition_settings'] LOOP
         IF NOT EXISTS (
             SELECT 1 FROM pg_publication_tables
             WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = t

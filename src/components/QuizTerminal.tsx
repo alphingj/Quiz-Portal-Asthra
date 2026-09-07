@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
-import type { Participant, Question } from '../types';
+import type { Participant, Question, CompetitionSettings } from '../types';
+import { DEFAULT_COMPETITION_SETTINGS } from '../types';
 import { store } from '../services/store';
 import { soundManager } from '../services/audio';
 import { CryptoToolbox } from './CryptoToolbox';
@@ -19,7 +20,9 @@ import {
   ArrowRight,
   RefreshCw,
   Trophy,
-  AlertOctagon
+  AlertOctagon,
+  Timer,
+  SkipForward
 } from 'lucide-react';
 
 interface QuizTerminalProps {
@@ -45,6 +48,11 @@ export const QuizTerminal: React.FC<QuizTerminalProps> = ({
   const [showShake, setShowShake] = useState(false);
   const [showVictoryModal, setShowVictoryModal] = useState(false);
 
+  // Timed-competition mode
+  const [compSettings, setCompSettings] = useState<CompetitionSettings>({ ...DEFAULT_COMPETITION_SETTINGS });
+  const [nowTick, setNowTick] = useState<number>(() => Date.now());
+  const [isSkipping, setIsSkipping] = useState(false);
+
   // Anti-cheat warning modal state
   const [cheatWarning, setCheatWarning] = useState<{
     visible: boolean;
@@ -58,16 +66,57 @@ export const QuizTerminal: React.FC<QuizTerminalProps> = ({
 
   const lastCheatReportRef = useRef<number>(0);
 
-  // Load questions
+  // Load questions + competition settings
   useEffect(() => {
     const fetchQ = async () => {
       setLoading(true);
-      const qList = await store.getQuestions();
+      const [qList, settings] = await Promise.all([
+        store.getQuestions(),
+        store.getCompetitionSettings(),
+      ]);
       setQuestions(qList);
+      setCompSettings(settings);
       setLoading(false);
     };
     fetchQ();
+
+    // Competition settings can flip live/ended mid-session (admin Start/End),
+    // and the question list can change (admin add/delete/count)
+    const handleSettingsUpdate = async () => {
+      const [qList, settings] = await Promise.all([
+        store.getQuestions(),
+        store.getCompetitionSettings(),
+      ]);
+      setQuestions(qList);
+      setCompSettings(settings);
+    };
+    window.addEventListener('asthra_data_update', handleSettingsUpdate);
+    window.addEventListener('storage', handleSettingsUpdate);
+    return () => {
+      window.removeEventListener('asthra_data_update', handleSettingsUpdate);
+      window.removeEventListener('storage', handleSettingsUpdate);
+    };
   }, []);
+
+  // 1-second ticker driving the per-question countdown (display only —
+  // scoring authority is the stored timestamp inside store.submitAnswer)
+  useEffect(() => {
+    if (!participant || participant.completed || participant.is_banned) return;
+    if (compSettings.status !== 'live') return;
+    const t = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [participant?.id, participant?.completed, participant?.is_banned, compSettings.status]);
+
+  // Backfill the per-question start timestamp for legacy rows / late joiners
+  useEffect(() => {
+    if (!participant || participant.completed || participant.current_question_started_at) return;
+    let cancelled = false;
+    store.ensureQuestionStart(participant.id).then((fresh) => {
+      if (!cancelled && fresh) onParticipantUpdated(fresh);
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [participant?.id]);
 
   // Anti-cheat proctoring listeners (visibilitychange & blur)
   useEffect(() => {
@@ -120,10 +169,35 @@ export const QuizTerminal: React.FC<QuizTerminalProps> = ({
     };
   }, [participant]);
 
+  // Active rounds in play: first N by order (admin-configurable count)
+  const activeCount = Math.max(1, Math.min(compSettings.active_question_count, Math.max(questions.length, 1)));
+  const activeQuestions = questions.slice(0, activeCount);
+
   // Current question index based on participant's progress
   const currentIdx = participant ? participant.current_question_index : 0;
-  const currentQuestion = questions[currentIdx] || null;
-  const isCompleted = participant ? participant.completed || currentIdx >= questions.length : false;
+  const currentQuestion = activeQuestions[currentIdx] || null;
+  const isCompleted = participant ? participant.completed || currentIdx >= activeQuestions.length : false;
+
+  // Per-question countdown (display): deadline = question start + time limit
+  const questionStartMs = participant?.current_question_started_at
+    ? new Date(participant.current_question_started_at).getTime()
+    : nowTick;
+  const elapsedSeconds = Math.max(0, Math.floor((nowTick - questionStartMs) / 1000));
+  const remainingSeconds = compSettings.time_limit_seconds - elapsedSeconds;
+  const isTimedOut = compSettings.status === 'live' && !isCompleted && remainingSeconds <= 0;
+  const currentValue = currentQuestion
+    ? Math.max(0, currentQuestion.points - elapsedSeconds * compSettings.decay_per_second)
+    : 0;
+  const timerFraction = currentQuestion
+    ? Math.max(0, Math.min(1, remainingSeconds / compSettings.time_limit_seconds))
+    : 0;
+
+  const formatCountdown = (totalSeconds: number) => {
+    const s = Math.max(0, totalSeconds);
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return `${m.toString().padStart(2, '0')}:${r.toString().padStart(2, '0')}`;
+  };
 
   // Reset answer input when question advances
   useEffect(() => {
@@ -169,12 +243,39 @@ export const QuizTerminal: React.FC<QuizTerminalProps> = ({
         setShowShake(true);
         setTimeout(() => setShowShake(false), 500);
         setFeedback({ isError: true, message: result.message });
+        if (result.timedOut && result.updatedParticipant) {
+          onParticipantUpdated(result.updatedParticipant);
+        }
       }
     } catch {
       soundManager.playError();
       setFeedback({ isError: true, message: 'Transmission error. Please re-attempt submission.' });
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const handleSkip = async () => {
+    if (!participant || isSkipping) return;
+    setIsSkipping(true);
+    soundManager.playKeypress();
+    try {
+      const result = await store.skipQuestion(participant.id);
+      if (result.success && result.updatedParticipant) {
+        onParticipantUpdated(result.updatedParticipant);
+        setFeedback({ isError: false, message: result.message });
+        if (result.completedEvent) {
+          setShowVictoryModal(true);
+        }
+      } else {
+        soundManager.playError();
+        setFeedback({ isError: true, message: result.message });
+      }
+    } catch {
+      soundManager.playError();
+      setFeedback({ isError: true, message: 'Skip failed. Please try again.' });
+    } finally {
+      setIsSkipping(false);
     }
   };
 
@@ -297,6 +398,87 @@ export const QuizTerminal: React.FC<QuizTerminalProps> = ({
     );
   }
 
+  // State 2b: Competition hasn't started yet — waiting room
+  if (participant && !participant.completed && compSettings.status === 'waiting') {
+    return (
+      <div style={{ maxWidth: '800px', margin: '60px auto', padding: '0 20px' }}>
+        <div className="glass-card glow-border-amber" style={{
+          padding: '48px 32px',
+          textAlign: 'center',
+          background: 'rgba(8, 14, 26, 0.9)',
+          position: 'relative'
+        }}>
+          <div style={{
+            width: '68px',
+            height: '68px',
+            borderRadius: '50%',
+            background: 'rgba(255, 176, 32, 0.1)',
+            border: '2px solid var(--accent-amber)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            margin: '0 auto 20px',
+            color: 'var(--accent-amber)',
+            boxShadow: '0 0 25px rgba(255, 176, 32, 0.3)'
+          }}>
+            <Timer size={32} />
+          </div>
+
+          <div className="cyber-badge cyber-badge-amber" style={{ marginBottom: '12px' }}>
+            ○ STANDBY — AWAITING START SIGNAL
+          </div>
+
+          <h2 style={{ fontSize: '2rem', color: '#ffffff', marginBottom: '12px' }}>
+            Competition Has Not Started
+          </h2>
+
+          <p style={{ fontSize: '1rem', color: 'var(--text-secondary)', maxWidth: '520px', margin: '0 auto 12px', lineHeight: 1.6 }}>
+            Welcome, <strong style={{ color: '#ffffff' }}>{participant.team_name || participant.username}</strong>. The event coordinator has not pressed <strong>Start Competition</strong> yet. This screen goes live automatically.
+          </p>
+          <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+            {activeCount} ROUND{activeCount === 1 ? '' : 'S'} • {formatCountdown(compSettings.time_limit_seconds)} PER ROUND • −{compSettings.decay_per_second} PT/S DECAY
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // State 2c: Competition ended — terminal locked
+  if (participant && !participant.completed && compSettings.status === 'ended') {
+    return (
+      <div style={{ maxWidth: '800px', margin: '60px auto', padding: '0 20px' }}>
+        <div className="glass-card" style={{
+          padding: '48px 32px',
+          textAlign: 'center',
+          background: 'rgba(18, 5, 8, 0.95)',
+          border: '2px solid var(--neon-red)',
+          position: 'relative'
+        }}>
+          <span className="cyber-badge cyber-badge-red" style={{ marginBottom: '12px' }}>
+            ■ COMPETITION ENDED
+          </span>
+
+          <h2 style={{ fontSize: '2rem', color: '#ffffff', marginBottom: '12px' }}>
+            Terminal Locked : Time Called
+          </h2>
+
+          <p style={{ fontSize: '1rem', color: 'var(--text-secondary)', maxWidth: '520px', margin: '0 auto 24px', lineHeight: 1.6 }}>
+            The coordinator has ended the competition. Final score for <strong style={{ color: '#ffffff' }}>{participant.team_name || participant.username}</strong>: <strong style={{ color: 'var(--neon-green)', fontFamily: 'var(--font-mono)' }}>{participant.score} PTS</strong>
+          </p>
+
+          <button
+            onClick={() => { soundManager.playKeypress(); onViewLeaderboard(); }}
+            className="cyber-btn cyber-btn-primary"
+            style={{ fontSize: '1rem', padding: '14px 32px' }}
+          >
+            <Trophy size={18} />
+            View Final Standings
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   // State 3: Participant has completed all rounds
   if (isCompleted) {
     return (
@@ -327,7 +509,7 @@ export const QuizTerminal: React.FC<QuizTerminalProps> = ({
           </h2>
 
           <p style={{ fontSize: '1.05rem', color: 'var(--text-secondary)', maxWidth: '580px', margin: '0 auto 24px' }}>
-            Outstanding cryptanalysis work, <strong style={{ color: 'var(--neon-green)' }}>{participant.team_name || participant.username}</strong>! You have successfully solved all 3 rounds of Asthra 11.0 KeyBreak.
+            Outstanding cryptanalysis work, <strong style={{ color: 'var(--neon-green)' }}>{participant.team_name || participant.username}</strong>! You have successfully solved all {activeCount} round{activeCount === 1 ? '' : 's'} of Asthra 11.0 KeyBreak.
           </p>
 
           <div style={{
@@ -349,7 +531,7 @@ export const QuizTerminal: React.FC<QuizTerminalProps> = ({
             <div>
               <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>ROUNDS CRACKED</div>
               <div style={{ fontSize: '1.8rem', fontWeight: 800, color: 'var(--neon-cyan)', fontFamily: 'var(--font-mono)' }}>
-                3 / 3
+                {Math.min(currentIdx, activeCount)} / {activeCount}
               </div>
             </div>
           </div>
@@ -382,6 +564,7 @@ export const QuizTerminal: React.FC<QuizTerminalProps> = ({
           participant={participant}
           onClose={() => setShowVictoryModal(false)}
           onViewLeaderboard={onViewLeaderboard}
+          totalRounds={activeCount}
         />
       )}
 
@@ -405,16 +588,54 @@ export const QuizTerminal: React.FC<QuizTerminalProps> = ({
             color: 'var(--accent-amber)',
             fontWeight: 700
           }}>
-            ROUND {currentIdx + 1} OF {questions.length}
+            ROUND {currentIdx + 1} OF {activeCount}
           </div>
           <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
             Playing as: <strong style={{ color: '#ffffff' }}>{participant.team_name || participant.username}</strong>
           </span>
         </div>
 
+        {/* Per-question countdown (timed mode) */}
+        {compSettings.status === 'live' && currentQuestion && (
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '12px',
+            marginBottom: '20px',
+            padding: '12px 18px',
+            borderRadius: 'var(--radius-md)',
+            background: isTimedOut ? 'rgba(255, 51, 102, 0.1)' : 'rgba(0, 240, 255, 0.05)',
+            border: `1px solid ${isTimedOut ? 'rgba(255, 51, 102, 0.5)' : 'rgba(0, 240, 255, 0.25)'}`
+          }}>
+            <Timer size={20} color={isTimedOut ? 'var(--neon-red)' : 'var(--neon-cyan)'} />
+            <div style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: '1.5rem',
+              fontWeight: 800,
+              color: isTimedOut ? 'var(--neon-red)' : remainingSeconds <= 60 ? 'var(--accent-amber)' : 'var(--neon-cyan)',
+              minWidth: '76px'
+            }}>
+              {isTimedOut ? '00:00' : formatCountdown(remainingSeconds)}
+            </div>
+            <div style={{ flex: 1, height: '8px', borderRadius: '4px', background: 'rgba(255, 255, 255, 0.08)', overflow: 'hidden' }}>
+              <div style={{
+                height: '100%',
+                width: `${timerFraction * 100}%`,
+                borderRadius: '4px',
+                background: isTimedOut ? 'var(--neon-red)' : remainingSeconds <= 60 ? 'var(--accent-amber)' : 'var(--neon-cyan)',
+                transition: 'width 1s linear'
+              }} />
+            </div>
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: '0.85rem', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
+              VALUE: <strong style={{ color: isTimedOut ? 'var(--neon-red)' : 'var(--neon-green)' }}>{currentValue} PTS</strong>
+              <span style={{ color: 'var(--text-muted)' }}> (−{compSettings.decay_per_second}/s)</span>
+            </div>
+          </div>
+        )}
+
         {/* Multi-step indicator */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          {questions.map((q, i) => (
+          {activeQuestions.map((q, i) => (
             <div
               key={q.id}
               style={{
@@ -499,8 +720,8 @@ export const QuizTerminal: React.FC<QuizTerminalProps> = ({
               }`}>
                 {currentQuestion.difficulty}
               </span>
-              <span className="cyber-badge cyber-badge-amber">
-                +{currentQuestion.points} PTS
+              <span className="cyber-badge cyber-badge-amber" title={compSettings.status === 'live' ? `Decays −${compSettings.decay_per_second}/s from ${currentQuestion.points} PTS` : undefined}>
+                {compSettings.status === 'live' ? `+${currentValue} / ${currentQuestion.points} PTS` : `+${currentQuestion.points} PTS`}
               </span>
             </div>
           </div>
@@ -608,7 +829,34 @@ export const QuizTerminal: React.FC<QuizTerminalProps> = ({
             )}
           </div>
 
-          {/* Answer Submission Form */}
+          {/* Timeout: submissions locked, skip-only */}
+          {isTimedOut ? (
+            <div style={{
+              marginTop: '4px',
+              padding: '20px 22px',
+              borderRadius: 'var(--radius-md)',
+              background: 'rgba(255, 51, 102, 0.08)',
+              border: '1px solid rgba(255, 51, 102, 0.4)',
+              textAlign: 'center'
+            }}>
+              <div style={{ fontSize: '1rem', fontWeight: 800, color: 'var(--neon-red)', marginBottom: '6px', letterSpacing: '0.04em' }}>
+                TIME EXPIRED — ROUND VALUE DEPLETED (0 PTS)
+              </div>
+              <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '16px' }}>
+                The {formatCountdown(compSettings.time_limit_seconds)} window for this round has closed. Submissions are locked — skip to the next round to continue.
+              </p>
+              <button
+                onClick={handleSkip}
+                disabled={isSkipping}
+                className="cyber-btn cyber-btn-primary"
+                style={{ padding: '14px 32px', fontSize: '1rem' }}
+              >
+                <SkipForward size={18} />
+                {isSkipping ? 'Skipping...' : 'Skip to Next Round (0 PTS)'}
+              </button>
+            </div>
+          ) : (
+          /* Answer Submission Form */
           <form onSubmit={handleSubmit}>
             <label style={{
               display: 'block',
@@ -654,6 +902,7 @@ export const QuizTerminal: React.FC<QuizTerminalProps> = ({
               </button>
             </div>
           </form>
+          )}
 
           {/* Feedback Alert */}
           {feedback && (
@@ -686,6 +935,7 @@ export const QuizTerminal: React.FC<QuizTerminalProps> = ({
           participant={participant}
           onClose={() => setShowVictoryModal(false)}
           onViewLeaderboard={onViewLeaderboard}
+          totalRounds={activeCount}
         />
       )}
 
