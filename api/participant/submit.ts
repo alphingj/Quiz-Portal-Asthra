@@ -1,7 +1,7 @@
 // Vercel Serverless Function: participant answer submission.
 // Calls the server-side rpc_submit_answer RPC for atomic, validated scoring.
 
-import { getServiceSupabase } from '../_helpers';
+import { getServiceSupabase } from '../_helpers.js';
 
 type Req = {
   method?: string;

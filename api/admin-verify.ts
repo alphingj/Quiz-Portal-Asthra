@@ -3,7 +3,7 @@
 // Includes rate limiting and fail-closed behavior.
 
 import { timingSafeEqual } from 'node:crypto';
-import { signAdminToken, isRateLimited } from './_helpers';
+import { signAdminToken, isRateLimited } from './_helpers.js';
 
 type Req = {
   method?: string;

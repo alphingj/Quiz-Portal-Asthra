@@ -2,7 +2,7 @@
 // Requires a valid admin JWT token in the Authorization header.
 // Uses service_role Supabase client (bypasses RLS).
 
-import { getServiceSupabase, verifyAdminToken } from '../_helpers';
+import { getServiceSupabase, verifyAdminToken } from '../_helpers.js';
 import bcrypt from 'bcrypt';
 
 type Req = {

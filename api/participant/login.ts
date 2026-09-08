@@ -2,7 +2,7 @@
 // Validates credentials server-side so passwords never transit to the browser.
 // Returns participant data without the password_hash field.
 
-import { getServiceSupabase } from '../_helpers';
+import { getServiceSupabase } from '../_helpers.js';
 import bcrypt from 'bcrypt';
 
 type Req = {
