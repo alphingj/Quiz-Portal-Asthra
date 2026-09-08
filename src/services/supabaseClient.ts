@@ -14,6 +14,11 @@ export function getSupabaseConfig(): { url: string; anonKey: string } {
   } catch {
     // Ignore in non-vite runtimes
   }
+  // In production (env vars set), always use env vars (#32).
+  // Only allow localStorage override in dev mode (no env vars).
+  if (envUrl && envKey) {
+    return { url: envUrl.trim(), anonKey: envKey.trim() };
+  }
   const url = localStorage.getItem(STORAGE_URL_KEY) || envUrl;
   const anonKey = localStorage.getItem(STORAGE_ANON_KEY) || envKey;
   return { url: url.trim(), anonKey: anonKey.trim() };

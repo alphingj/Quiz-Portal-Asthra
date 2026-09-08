@@ -1,13 +1,15 @@
 // Vercel Serverless Function: verifies the admin passkey server-side.
-// The secret lives in the server-only `ADMIN_PASSKEY` env var (no VITE_
-// prefix), so it is NEVER shipped to the browser. The frontend POSTs a
-// candidate passkey here and only receives { ok: true/false }.
+// On success, issues a signed JWT token for subsequent admin API calls.
+// Includes rate limiting and fail-closed behavior.
 
 import { timingSafeEqual } from 'node:crypto';
+import { signAdminToken, isRateLimited } from './_helpers';
 
 type Req = {
   method?: string;
   body?: unknown;
+  headers?: Record<string, string | string[] | undefined>;
+  socket?: { remoteAddress?: string };
 };
 
 type Res = {
@@ -27,6 +29,12 @@ function constantTimeEquals(a: string, b: string): boolean {
   }
 }
 
+function getClientIp(req: Req): string {
+  const forwarded = req.headers?.['x-forwarded-for'];
+  if (typeof forwarded === 'string') return forwarded.split(',')[0].trim();
+  return req.socket?.remoteAddress || 'unknown';
+}
+
 export default async function handler(req: Req, res: Res) {
   res.setHeader('Cache-Control', 'no-store');
 
@@ -34,7 +42,18 @@ export default async function handler(req: Req, res: Res) {
     return res.status(405).json({ ok: false, message: 'Method not allowed.' });
   }
 
-  const expected = process.env.ADMIN_PASSKEY || 'asthra11@admin';
+  // Fail closed: require ADMIN_PASSKEY in production (#29)
+  const expected = process.env.ADMIN_PASSKEY;
+  if (!expected) {
+    console.error('ADMIN_PASSKEY environment variable is not set. Admin access is disabled.');
+    return res.status(500).json({ ok: false, message: 'Server misconfigured: admin passkey not set.' });
+  }
+
+  // Rate limiting (#30)
+  const clientIp = getClientIp(req);
+  if (isRateLimited(clientIp)) {
+    return res.status(429).json({ ok: false, message: 'Too many attempts. Try again later.' });
+  }
 
   let candidate = '';
   try {
@@ -60,5 +79,12 @@ export default async function handler(req: Req, res: Res) {
     return res.status(401).json({ ok: false, message: 'Invalid Admin Passkey.' });
   }
 
-  return res.status(200).json({ ok: true });
+  // Issue a signed JWT token for subsequent admin API calls (#3)
+  try {
+    const token = signAdminToken();
+    return res.status(200).json({ ok: true, token });
+  } catch (err) {
+    console.error('Failed to sign admin token:', err);
+    return res.status(500).json({ ok: false, message: 'Server error issuing auth token.' });
+  }
 }

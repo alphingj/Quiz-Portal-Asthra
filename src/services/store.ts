@@ -51,6 +51,53 @@ const STORAGE_SUBMISSIONS = 'asthra_submissions_data';
 const STORAGE_WARNINGS = 'asthra_cheat_warnings_data';
 const STORAGE_SETTINGS = 'asthra_competition_settings';
 
+// Admin JWT token management
+let adminToken: string | null = null;
+
+export function setAdminToken(token: string) {
+  adminToken = token;
+  sessionStorage.setItem('asthra_admin_token', token);
+}
+
+export function getAdminToken(): string | null {
+  if (adminToken) return adminToken;
+  adminToken = sessionStorage.getItem('asthra_admin_token');
+  return adminToken;
+}
+
+export function clearAdminToken() {
+  adminToken = null;
+  sessionStorage.removeItem('asthra_admin_token');
+}
+
+/** Check if we are in dev mode (no Supabase configured). */
+function isDevMode(): boolean {
+  return !getSupabase();
+}
+
+/** Call an admin API endpoint with JWT auth. */
+async function adminApiCall(action: string, params: Record<string, unknown> = {}): Promise<any> {
+  const token = getAdminToken();
+  if (!token && !isDevMode()) {
+    throw new Error('Admin token not available. Please re-authenticate.');
+  }
+
+  const res = await fetch('/api/admin/action', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ action, ...params }),
+  });
+
+  const data = await res.json();
+  if (!res.ok || !data.ok) {
+    throw new Error(data.message || `Admin action "${action}" failed.`);
+  }
+  return data;
+}
+
 class StoreService {
   private getLocalParticipants(): Participant[] {
     const data = localStorage.getItem(STORAGE_PARTICIPANTS);
@@ -131,51 +178,56 @@ class StoreService {
   }
 
   // --- QUESTIONS API ---
+  // Uses questions_public view (no answer column) for participant reads (#2)
   public async getQuestions(): Promise<Question[]> {
     const supabase = getSupabase();
     if (supabase) {
       try {
         const { data, error } = await supabase
-          .from('questions')
+          .from('questions_public')
           .select('*')
           .order('order_index', { ascending: true });
-        if (!error && data && data.length > 0) {
+        if (error) {
+          console.warn('Supabase fetch questions error:', error.message);
+          // Fail closed in production (#8): do not fall back to local
+          throw new Error(`Database error: ${error.message}`);
+        }
+        // Distinguish empty result from failure (#36)
+        if (data) {
           this.saveLocalQuestions(data);
           return data;
         }
       } catch (err) {
+        if (!isDevMode()) {
+          // In production, propagate the error
+          throw err;
+        }
         console.warn('Supabase fetch questions error, fallback to local', err);
       }
     }
     return this.getLocalQuestions();
   }
 
+  // Admin: update question (via API)
   public async updateQuestion(id: number, data: Partial<Question>): Promise<Question[]> {
-    const questions = await this.getQuestions();
-    const idx = questions.findIndex(q => q.id === id);
-    if (idx >= 0) {
-      questions[idx] = { ...questions[idx], ...data };
-      const supabase = getSupabase();
-      if (supabase) {
-        try {
-          await supabase.from('questions').upsert(questions[idx]);
-        } catch (err) {
-          console.warn('Supabase question update error', err);
-        }
+    if (!isDevMode()) {
+      await adminApiCall('updateQuestion', { id, data });
+    } else {
+      const questions = await this.getQuestions();
+      const idx = questions.findIndex(q => q.id === id);
+      if (idx >= 0) {
+        questions[idx] = { ...questions[idx], ...data };
+        this.saveLocalQuestions(questions);
       }
-      this.saveLocalQuestions(questions);
     }
-    return questions;
+    return this.getQuestions();
   }
 
+  // Admin: save/upsert question (via API for Supabase, local for dev)
   public async saveQuestion(question: Question): Promise<Question[]> {
-    const supabase = getSupabase();
-    if (supabase) {
-      try {
-        await supabase.from('questions').upsert(question);
-      } catch (err) {
-        console.warn('Supabase question upsert error', err);
-      }
+    if (!isDevMode()) {
+      // When called from AdminPanel after API insert, just refresh from DB
+      return this.getQuestions();
     }
     const questions = this.getLocalQuestions();
     const idx = questions.findIndex(q => q.id === question.id);
@@ -188,29 +240,18 @@ class StoreService {
     return questions;
   }
 
-  // Delete a question entirely + renumber remaining rounds sequentially
+  // Admin: delete question (via API with atomic RPC) (#10)
   public async deleteQuestion(id: number): Promise<Question[]> {
-    const questions = (await this.getQuestions()).filter(q => q.id !== id);
-    const renumbered = questions
-      .sort((a, b) => a.order_index - b.order_index)
-      .map((q, i) => ({ ...q, order_index: i + 1, round_number: i + 1 }));
-
-    const supabase = getSupabase();
-    if (supabase) {
-      try {
-        await supabase.from('questions').delete().eq('id', id);
-        if (renumbered.length > 0) {
-          await supabase.from('questions').upsert(renumbered);
-        }
-      } catch (err) {
-        console.warn('Supabase delete question error', err);
-      }
+    if (!isDevMode()) {
+      await adminApiCall('deleteQuestion', { id });
+    } else {
+      const questions = this.getLocalQuestions().filter(q => q.id !== id);
+      const renumbered = questions
+        .sort((a, b) => a.order_index - b.order_index)
+        .map((q, i) => ({ ...q, order_index: i + 1, round_number: i + 1 }));
+      this.saveLocalQuestions(renumbered);
     }
-    this.saveLocalQuestions(renumbered);
-    // Participants pointing past the shrunk list get clamped
-    const settings = await this.getCompetitionSettings();
-    await this.clampParticipantProgress(renumbered.length, settings.active_question_count);
-    return renumbered;
+    return this.getQuestions();
   }
 
   // --- COMPETITION SETTINGS API (timed-competition mode) ---
@@ -241,6 +282,10 @@ class StoreService {
           .select('*')
           .eq('id', 1)
           .single();
+        if (error) {
+          console.warn('Supabase fetch settings error:', error.message);
+          if (!isDevMode()) throw new Error(`Database error: ${error.message}`);
+        }
         if (!error && data) {
           const settings: CompetitionSettings = {
             id: 1,
@@ -255,12 +300,14 @@ class StoreService {
           return settings;
         }
       } catch (err) {
+        if (!isDevMode()) throw err;
         console.warn('Supabase fetch settings error, fallback to local', err);
       }
     }
     return this.getLocalSettings();
   }
 
+  // Admin: update competition settings (via API) (#15 - called on explicit save)
   public async updateCompetitionSettings(patch: Partial<CompetitionSettings>): Promise<CompetitionSettings> {
     const prev = await this.getCompetitionSettings();
     const next: CompetitionSettings = {
@@ -273,29 +320,21 @@ class StoreService {
       updated_at: new Date().toISOString(),
     };
 
-    const supabase = getSupabase();
-    if (supabase) {
-      try {
-        await supabase.from('competition_settings').upsert({
-          id: 1,
+    if (!isDevMode()) {
+      await adminApiCall('updateSettings', {
+        settings: {
           status: next.status,
           started_at: next.started_at,
           time_limit_seconds: next.time_limit_seconds,
           decay_per_second: next.decay_per_second,
           active_question_count: next.active_question_count,
-          updated_at: next.updated_at,
-        });
-      } catch (err) {
-        console.warn('Supabase update settings error', err);
-      }
+        },
+      });
+      // Re-fetch from DB to ensure consistency
+      return this.getCompetitionSettings();
     }
-    this.saveLocalSettings(next);
 
-    // If the admin shrank the active rounds, clamp anyone now past the end
-    if (next.active_question_count !== prev.active_question_count) {
-      const questions = await this.getQuestions();
-      await this.clampParticipantProgress(questions.length, next.active_question_count);
-    }
+    this.saveLocalSettings(next);
     return next;
   }
 
@@ -305,50 +344,19 @@ class StoreService {
       this.getQuestions(),
       this.getCompetitionSettings(),
     ]);
-    return questions.slice(0, Math.max(1, settings.active_question_count));
+    // Clamp active count to actual question count (#9)
+    const activeCount = Math.min(Math.max(1, settings.active_question_count), questions.length);
+    return questions.slice(0, activeCount);
   }
 
-  // Clamp participants whose index is past the available/active questions
-  private async clampParticipantProgress(totalQuestions: number, activeCount: number): Promise<void> {
-    const participants = await this.getParticipants();
-    const now = new Date().toISOString();
-    const updates: Participant[] = [];
-    for (const p of participants) {
-      const clampedIndex = Math.min(p.current_question_index, Math.max(0, totalQuestions));
-      const shouldComplete = clampedIndex >= Math.max(1, activeCount);
-      if (clampedIndex !== p.current_question_index || (shouldComplete && !p.completed)) {
-        updates.push({
-          ...p,
-          current_question_index: clampedIndex,
-          completed: p.completed || shouldComplete,
-          completed_at: p.completed_at || (shouldComplete ? now : null),
-        });
-      }
-    }
-    if (updates.length === 0) return;
-
-    const supabase = getSupabase();
-    if (supabase) {
-      try {
-        await Promise.all(updates.map(u =>
-          supabase.from('participants').update({
-            current_question_index: u.current_question_index,
-            completed: u.completed,
-            completed_at: u.completed_at,
-          }).eq('id', u.id)
-        ));
-      } catch (err) {
-        console.warn('Supabase clamp progress error', err);
-      }
-    }
-    const byId = new Map(updates.map(u => [u.id, u]));
-    this.saveLocalParticipants(this.getLocalParticipants().map(p => byId.get(p.id) || p));
-  }
-
-  // START COMPETITION: go live + reset every participant for a fresh run
+  // START COMPETITION: go live + reset every participant for a fresh run (atomic RPC #14)
   public async startCompetition(): Promise<CompetitionSettings> {
+    if (!isDevMode()) {
+      await adminApiCall('startCompetition');
+      return this.getCompetitionSettings();
+    }
+    // Local dev fallback
     const now = new Date().toISOString();
-    const participants = await this.getParticipants();
     const resetData = {
       current_question_index: 0,
       score: 0,
@@ -357,29 +365,35 @@ class StoreService {
       completed_at: null,
       current_question_started_at: now,
     };
-
-    const supabase = getSupabase();
-    if (supabase) {
-      try {
-        await Promise.all(participants.map(p =>
-          supabase.from('participants').update(resetData).eq('id', p.id)
-        ));
-      } catch (err) {
-        console.warn('Supabase start-competition reset error', err);
-      }
-    }
     this.saveLocalParticipants(this.getLocalParticipants().map(p => ({ ...p, ...resetData })));
-    return this.updateCompetitionSettings({ status: 'live', started_at: now });
+    const settings = this.getLocalSettings();
+    const next = { ...settings, status: 'live' as const, started_at: now, updated_at: now };
+    this.saveLocalSettings(next);
+    return next;
   }
 
   // END COMPETITION: lock the quiz terminal
   public async endCompetition(): Promise<CompetitionSettings> {
-    return this.updateCompetitionSettings({ status: 'ended' });
+    if (!isDevMode()) {
+      await adminApiCall('endCompetition');
+      return this.getCompetitionSettings();
+    }
+    const settings = this.getLocalSettings();
+    const next = { ...settings, status: 'ended' as const, updated_at: new Date().toISOString() };
+    this.saveLocalSettings(next);
+    return next;
   }
 
   // Back to waiting room (re-arm for another run without wiping config)
   public async resetCompetitionToWaiting(): Promise<CompetitionSettings> {
-    return this.updateCompetitionSettings({ status: 'waiting', started_at: null });
+    if (!isDevMode()) {
+      await adminApiCall('resetToWaiting');
+      return this.getCompetitionSettings();
+    }
+    const settings = this.getLocalSettings();
+    const next = { ...settings, status: 'waiting' as const, started_at: null, updated_at: new Date().toISOString() };
+    this.saveLocalSettings(next);
+    return next;
   }
 
   // Ensure a participant has a per-question start timestamp (backfills legacy
@@ -394,18 +408,22 @@ class StoreService {
     const supabase = getSupabase();
     if (supabase) {
       try {
-        const { data } = await supabase
+        const { data, error } = await supabase
           .from('participants')
           .update({ current_question_started_at: now })
           .eq('id', participantId)
           .select()
           .single();
-        if (data) {
+        if (error) {
+          console.warn('Supabase ensure question start error:', error.message);
+        } else if (data) {
+          // Strip password_hash if present
+          const { password_hash: _, ...safeData } = data as any;
           const list = this.getLocalParticipants().map(part =>
             part.id === participantId ? { ...part, current_question_started_at: now } : part
           );
           this.saveLocalParticipants(list);
-          return data as Participant;
+          return safeData as Participant;
         }
       } catch (err) {
         console.warn('Supabase ensure question start error', err);
@@ -423,22 +441,28 @@ class StoreService {
     const supabase = getSupabase();
     if (supabase) {
       try {
+        // Select only safe columns — never select password_hash (#2)
         const { data, error } = await supabase
           .from('participants')
-          .select('*')
+          .select('id, username, team_name, current_question_index, score, completed, is_banned, warning_count, role, started_at, completed_at, created_at, current_question_started_at')
           .order('score', { ascending: false });
+        if (error) {
+          console.warn('Supabase fetch participants error:', error.message);
+          if (!isDevMode()) throw new Error(`Database error: ${error.message}`);
+        }
         if (!error && data) {
           this.saveLocalParticipants(data);
           return data;
         }
       } catch (err) {
+        if (!isDevMode()) throw err;
         console.warn('Supabase fetch participants error, fallback to local', err);
       }
     }
     return this.getLocalParticipants();
   }
 
-  // Admin registers participant with optional role
+  // Admin: registers participant (via API) (#7 - checks error)
   public async createParticipant(username: string, password: string, teamName?: string, role?: 'admin' | 'moderator' | 'participant'): Promise<{ success: boolean; message: string; participant?: Participant }> {
     const trimmedUsername = username.trim().toLowerCase();
     const trimmedTeam = teamName?.trim() || null;
@@ -448,10 +472,25 @@ class StoreService {
       return { success: false, message: 'Username and password are required.' };
     }
 
+    if (!isDevMode()) {
+      try {
+        const result = await adminApiCall('createParticipant', {
+          username: trimmedUsername,
+          password: password.trim(),
+          teamName: trimmedTeam,
+          role: trimmedRole,
+        });
+        await this.getParticipants(); // refresh cache
+        return { success: true, message: 'Participant created successfully!', participant: result.participant };
+      } catch (err: any) {
+        return { success: false, message: err.message || 'Failed to create participant.' };
+      }
+    }
+
+    // Local fallback
     const newParticipant: Participant = {
       id: typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : 'p-' + Date.now(),
       username: trimmedUsername,
-      password: password.trim(),
       team_name: trimmedTeam,
       current_question_index: 0,
       score: 0,
@@ -463,57 +502,34 @@ class StoreService {
       current_question_started_at: new Date().toISOString(),
     };
 
-    const supabase = getSupabase();
-    if (supabase) {
-      try {
-        // Omit the newest column from the insert payload so registration keeps
-        // working even if the timed-mode migration hasn't been run yet
-        // (the column defaults to NOW() in the DB).
-        const { current_question_started_at: _qStart, ...dbParticipant } = newParticipant;
-        const { data, error } = await supabase
-          .from('participants')
-          .insert([dbParticipant])
-          .select()
-          .single();
-        if (error) {
-          return { success: false, message: `Database error: ${error.message}` };
-        }
-        await this.getParticipants();
-        return { success: true, message: 'Participant created in Supabase successfully!', participant: data || newParticipant };
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : 'Database request failed';
-        return { success: false, message: msg };
-      }
-    }
-
-    // Local fallback
     const list = this.getLocalParticipants();
     if (list.some(p => p.username.toLowerCase() === trimmedUsername)) {
       return { success: false, message: 'A participant with this username already exists.' };
     }
-
     list.push(newParticipant);
     this.saveLocalParticipants(list);
     return { success: true, message: 'Participant created successfully (Local Storage)!', participant: newParticipant };
   }
 
-  // Delete participant (Admin)
+  // Admin: delete participant (via API) (#7)
   public async deleteParticipant(id: string): Promise<boolean> {
-    const supabase = getSupabase();
-    if (supabase) {
-      try {
-        await supabase.from('participants').delete().eq('id', id);
-      } catch (err) {
-        console.warn('Supabase delete participant error', err);
-      }
+    if (!isDevMode()) {
+      await adminApiCall('deleteParticipant', { id });
+      await this.getParticipants(); // refresh cache
+      return true;
     }
     const list = this.getLocalParticipants().filter(p => p.id !== id);
     this.saveLocalParticipants(list);
     return true;
   }
 
-  // Reset participant progress (Admin)
+  // Admin: reset participant progress (via API) (#7)
   public async resetParticipant(id: string): Promise<boolean> {
+    if (!isDevMode()) {
+      await adminApiCall('resetParticipant', { id });
+      await this.getParticipants();
+      return true;
+    }
     const updateData = {
       current_question_index: 0,
       score: 0,
@@ -522,109 +538,65 @@ class StoreService {
       completed_at: null,
       current_question_started_at: new Date().toISOString(),
     };
-
-    const supabase = getSupabase();
-    if (supabase) {
-      try {
-        await supabase.from('participants').update(updateData).eq('id', id);
-      } catch (err) {
-        console.warn('Supabase reset participant error', err);
-      }
-    }
-
-    const list = this.getLocalParticipants().map(p => {
-      if (p.id === id) {
-        return { ...p, ...updateData };
-      }
-      return p;
-    });
+    const list = this.getLocalParticipants().map(p =>
+      p.id === id ? { ...p, ...updateData } : p
+    );
     this.saveLocalParticipants(list);
     return true;
   }
 
-  // Update participant password (Admin)
+  // Admin: update participant password (via API) (#7)
   public async updateParticipantPassword(id: string, newPassword: string): Promise<boolean> {
-    const supabase = getSupabase();
-    if (supabase) {
-      try {
-        await supabase.from('participants').update({ password: newPassword }).eq('id', id);
-      } catch (err) {
-        console.warn('Supabase update password error', err);
-      }
+    if (!isDevMode()) {
+      await adminApiCall('updatePassword', { id, newPassword });
+      return true;
     }
-    const list = this.getLocalParticipants().map(p => {
-      if (p.id === id) {
-        return { ...p, password: newPassword };
-      }
-      return p;
-    });
-    this.saveLocalParticipants(list);
+    // In dev mode, no-op (passwords not stored locally)
     return true;
   }
 
-  // Update participant role (Admin)
+  // Admin: update participant role (via API) (#7)
   public async updateParticipantRole(id: string, role: 'admin' | 'moderator' | 'participant'): Promise<boolean> {
-    const supabase = getSupabase();
-    if (supabase) {
-      try {
-        await supabase.from('participants').update({ role }).eq('id', id);
-      } catch (err) {
-        console.warn('Supabase update role error', err);
-      }
+    if (!isDevMode()) {
+      await adminApiCall('updateRole', { id, role });
+      await this.getParticipants();
+      return true;
     }
-    const list = this.getLocalParticipants().map(p => {
-      if (p.id === id) {
-        return { ...p, role };
-      }
-      return p;
-    });
+    const list = this.getLocalParticipants().map(p =>
+      p.id === id ? { ...p, role } : p
+    );
     this.saveLocalParticipants(list);
     return true;
   }
 
-  // Ban or Unban participant (Admin)
+  // Admin: ban or unban participant (via API) (#7)
   public async banParticipant(id: string, isBanned: boolean): Promise<boolean> {
-    const supabase = getSupabase();
-    if (supabase) {
-      try {
-        await supabase.from('participants').update({ is_banned: isBanned }).eq('id', id);
-      } catch (err) {
-        console.warn('Supabase ban participant error', err);
-      }
+    if (!isDevMode()) {
+      await adminApiCall('banParticipant', { id, isBanned });
+      await this.getParticipants();
+      return true;
     }
-
-    const list = this.getLocalParticipants().map(p => {
-      if (p.id === id) {
-        return { ...p, is_banned: isBanned };
-      }
-      return p;
-    });
+    const list = this.getLocalParticipants().map(p =>
+      p.id === id ? { ...p, is_banned: isBanned } : p
+    );
     this.saveLocalParticipants(list);
     return true;
   }
 
-  // Deduct points / apply timeout penalty (Admin)
+  // Admin: deduct points (via API) (#7)
   public async deductPoints(id: string, penalty: number): Promise<{ success: boolean; newScore: number }> {
-    const participants = await this.getParticipants();
+    if (!isDevMode()) {
+      const result = await adminApiCall('deductPoints', { id, penalty });
+      await this.getParticipants();
+      return { success: true, newScore: result.newScore };
+    }
+    const participants = this.getLocalParticipants();
     const p = participants.find(part => part.id === id);
     if (!p) return { success: false, newScore: 0 };
-
     const newScore = Math.max(0, p.score - penalty);
-    const supabase = getSupabase();
-    if (supabase) {
-      try {
-        await supabase.from('participants').update({ score: newScore }).eq('id', id);
-      } catch (err) {
-        console.warn('Supabase deductPoints error', err);
-      }
-    }
-
-    const list = this.getLocalParticipants().map(part => {
-      if (part.id === id) {
-        return { ...part, score: newScore };
-      }
-      return part;
-    });
+    const list = participants.map(part =>
+      part.id === id ? { ...part, score: newScore } : part
+    );
     this.saveLocalParticipants(list);
     return { success: true, newScore };
   }
@@ -647,43 +619,45 @@ class StoreService {
       timestamp: new Date().toISOString(),
     };
 
-    // Increment warning count on participant
-    const participants = await this.getParticipants();
-    const p = participants.find(part => part.id === participantId);
-    const newCount = (p?.warning_count || 0) + 1;
-
     const supabase = getSupabase();
     if (supabase) {
       try {
-        // Map to DB column names: table uses `created_at` (defaults to NOW()),
-        // not the frontend `timestamp` field — inserting unknown columns fails.
-        await supabase.from('warnings').insert([{
-          id: warning.id,
-          participant_id: warning.participant_id,
-          username: warning.username,
-          team_name: warning.team_name,
-          event_type: warning.event_type,
-          details: warning.details,
-        }]);
-        await supabase.from('participants').update({ warning_count: newCount }).eq('id', participantId);
+        // Use atomic RPC for warning increment (#35)
+        const { data, error } = await supabase.rpc('rpc_increment_warning', {
+          p_participant_id: participantId,
+          p_username: username,
+          p_team_name: teamName,
+          p_event_type: eventType,
+          p_details: warning.details,
+        });
+        if (error) {
+          console.warn('Supabase warning RPC error:', error.message);
+        }
+        // Update local warning count from RPC result
+        if (data && data.warningCount) {
+          const list = this.getLocalParticipants().map(part =>
+            part.id === participantId ? { ...part, warning_count: data.warningCount } : part
+          );
+          this.saveLocalParticipants(list);
+        }
       } catch (err) {
         console.warn('Supabase warning insert error', err);
       }
+    } else {
+      // Dev mode: local increment
+      const participants = this.getLocalParticipants();
+      const p = participants.find(part => part.id === participantId);
+      const newCount = (p?.warning_count || 0) + 1;
+      const list = participants.map(part =>
+        part.id === participantId ? { ...part, warning_count: newCount } : part
+      );
+      this.saveLocalParticipants(list);
     }
 
     // Save warning locally
     const warnings = this.getLocalWarnings();
     warnings.unshift(warning);
     this.saveLocalWarnings(warnings);
-
-    // Update participant locally
-    const list = this.getLocalParticipants().map(part => {
-      if (part.id === participantId) {
-        return { ...part, warning_count: newCount };
-      }
-      return part;
-    });
-    this.saveLocalParticipants(list);
 
     return warning;
   }
@@ -696,6 +670,10 @@ class StoreService {
           .from('warnings')
           .select('*')
           .order('created_at', { ascending: false });
+        if (error) {
+          console.warn('Supabase fetch warnings error:', error.message);
+          if (!isDevMode()) throw new Error(`Database error: ${error.message}`);
+        }
         if (!error && data) {
           const formatted: CheatingWarning[] = data.map((d: any) => ({
             id: d.id,
@@ -710,6 +688,7 @@ class StoreService {
           return formatted;
         }
       } catch (err) {
+        if (!isDevMode()) throw err;
         console.warn('Supabase fetch warnings error', err);
       }
     }
@@ -717,19 +696,14 @@ class StoreService {
   }
 
   public async clearWarnings(): Promise<boolean> {
-    const supabase = getSupabase();
-    if (supabase) {
-      try {
-        await supabase.from('warnings').delete().neq('id', '00000000-0000-0000-0000-000000000000');
-      } catch (err) {
-        console.warn('Supabase clear warnings error', err);
-      }
+    if (!isDevMode()) {
+      await adminApiCall('clearWarnings');
     }
     this.saveLocalWarnings([]);
     return true;
   }
 
-  // Participant Login
+  // Participant Login (via server-side API — passwords never reach browser #2, #31)
   public async loginParticipant(username: string, password: string): Promise<{
     success: boolean;
     message: string;
@@ -737,75 +711,74 @@ class StoreService {
     needsTeamName?: boolean;
   }> {
     const trimmedUser = username.trim().toLowerCase();
-    const supabase = getSupabase();
 
-    let participant: Participant | undefined;
+    // Try server-side login first
+    try {
+      const res = await fetch('/api/participant/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: trimmedUser, password: password.trim() }),
+      });
 
-    if (supabase) {
-      try {
-        const { data, error } = await supabase
-          .from('participants')
-          .select('*')
-          .eq('username', trimmedUser)
-          .single();
-
-        if (!error && data) {
-          if (data.password === password.trim()) {
-            participant = data;
-          } else {
-            return { success: false, message: 'Invalid password. Access denied.' };
-          }
-        }
-      } catch {
-        // Fallback to local
+      const data = await res.json();
+      if (res.ok && data.ok) {
+        return {
+          success: true,
+          message: data.message || 'Access granted. Welcome to KeyBreak!',
+          participant: data.participant,
+          needsTeamName: data.needsTeamName,
+        };
+      }
+      // Server returned an error
+      return { success: false, message: data.message || 'Login failed.' };
+    } catch {
+      // API unreachable — fall back to local if in dev mode
+      if (!isDevMode()) {
+        return { success: false, message: 'Login service unavailable. Please try again.' };
       }
     }
 
-    if (!participant) {
-      const list = this.getLocalParticipants();
-      const match = list.find(p => p.username.toLowerCase() === trimmedUser);
-      if (!match) {
-        return { success: false, message: 'Participant username not found. Contact the Asthra admin table to register.' };
-      }
-      if (match.password !== password.trim()) {
-        return { success: false, message: 'Incorrect password. Access denied.' };
-      }
-      participant = match;
+    // Local dev fallback (no passwords in local mode)
+    const list = this.getLocalParticipants();
+    const match = list.find(p => p.username.toLowerCase() === trimmedUser);
+    if (!match) {
+      return { success: false, message: 'Participant username not found. Contact the Asthra admin table to register.' };
     }
-
-    // Check if participant is banned / disqualified
-    if (participant.is_banned) {
-      return {
-        success: false,
-        message: 'ACCESS DENIED: Your account has been disqualified / banned by event administrators.',
-      };
+    if (match.is_banned) {
+      return { success: false, message: 'ACCESS DENIED: Your account has been disqualified / banned by event administrators.' };
     }
-
-    // Check if team name is missing (admin did not enter team name)
-    const needsTeamName = !participant.team_name || participant.team_name.trim() === '';
-
+    const needsTeamName = !match.team_name || match.team_name.trim() === '';
     return {
       success: true,
       message: 'Access granted. Welcome to KeyBreak!',
-      participant,
+      participant: match,
       needsTeamName,
     };
   }
 
-  // Update team name after login (if not set by admin)
+  // Update team name after login (if not set by admin) (#33 - update local cache)
   public async setTeamName(participantId: string, teamName: string): Promise<Participant | null> {
     const cleanTeam = teamName.trim();
     const supabase = getSupabase();
 
     if (supabase) {
       try {
-        const { data } = await supabase
+        const { data, error } = await supabase
           .from('participants')
           .update({ team_name: cleanTeam })
           .eq('id', participantId)
-          .select()
+          .select('id, username, team_name, current_question_index, score, completed, is_banned, warning_count, role, started_at, completed_at, created_at, current_question_started_at')
           .single();
-        if (data) return data;
+        if (error) {
+          console.warn('Supabase setTeamName error:', error.message);
+        } else if (data) {
+          // Update local cache (#33)
+          const list = this.getLocalParticipants().map(p =>
+            p.id === participantId ? { ...p, team_name: cleanTeam } : p
+          );
+          this.saveLocalParticipants(list);
+          return data;
+        }
       } catch (err) {
         console.warn('Supabase setTeamName error', err);
       }
@@ -822,23 +795,60 @@ class StoreService {
   }
 
   // Skip to next question after the per-question timer expired (0 points)
+  // Routes through server-side RPC for validation (#4, #6, #12)
   public async skipQuestion(participantId: string): Promise<{
     success: boolean;
     completedEvent: boolean;
     updatedParticipant: Participant | null;
     message: string;
   }> {
+    // Try server-side RPC first
+    try {
+      const res = await fetch('/api/participant/skip', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ participantId }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        return {
+          success: false,
+          completedEvent: false,
+          updatedParticipant: null,
+          message: data.message || 'Skip failed.',
+        };
+      }
+
+      // Update local cache with server response
+      const updatedP = data.updatedParticipant;
+      if (updatedP) {
+        const localList = this.getLocalParticipants().map(part =>
+          part.id === participantId ? { ...part, ...updatedP } : part
+        );
+        this.saveLocalParticipants(localList);
+      }
+
+      return {
+        success: data.success,
+        completedEvent: data.completedEvent,
+        updatedParticipant: updatedP ? { ...this.getLocalParticipants().find(p => p.id === participantId)!, ...updatedP } : null,
+        message: data.message,
+      };
+    } catch {
+      if (!isDevMode()) {
+        return { success: false, completedEvent: false, updatedParticipant: null, message: 'Skip service unavailable.' };
+      }
+    }
+
+    // Local dev fallback
     const [participants, activeQuestions] = await Promise.all([
       this.getParticipants(),
       this.getActiveQuestions(),
     ]);
     const p = participants.find(part => part.id === participantId);
-    if (!p) {
-      return { success: false, completedEvent: false, updatedParticipant: null, message: 'Participant not found.' };
-    }
-    if (p.is_banned) {
-      return { success: false, completedEvent: false, updatedParticipant: p, message: 'Account disqualified / banned.' };
-    }
+    if (!p) return { success: false, completedEvent: false, updatedParticipant: null, message: 'Participant not found.' };
+    if (p.is_banned) return { success: false, completedEvent: false, updatedParticipant: p, message: 'Account disqualified / banned.' };
 
     const now = new Date().toISOString();
     const nextIndex = p.current_question_index + 1;
@@ -850,14 +860,6 @@ class StoreService {
       current_question_started_at: now,
     };
 
-    const supabase = getSupabase();
-    if (supabase) {
-      try {
-        await supabase.from('participants').update(updatedData).eq('id', participantId);
-      } catch (err) {
-        console.warn('Supabase skip question error', err);
-      }
-    }
     const updatedList = this.getLocalParticipants().map(part =>
       part.id === participantId ? { ...part, ...updatedData } : part
     );
@@ -873,7 +875,7 @@ class StoreService {
     };
   }
 
-  // Submit Answer for Question (timed mode: points decay while the clock runs)
+  // Submit Answer for Question (via server-side RPC) (#4, #5, #6, #13)
   public async submitAnswer(
     participantId: string,
     questionId: number,
@@ -887,21 +889,64 @@ class StoreService {
     timedOut: boolean;
     award?: { basePoints: number; elapsedSeconds: number; awarded: number };
   }> {
-    // Check if banned
-    const participants = await this.getParticipants();
-    const currentParticipant = participants.find(part => part.id === participantId);
-    if (currentParticipant?.is_banned) {
+    // Try server-side RPC first
+    try {
+      const res = await fetch('/api/participant/submit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ participantId, questionId, rawAnswer }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        return {
+          isCorrect: false,
+          pointsAwarded: 0,
+          completedEvent: false,
+          updatedParticipant: null,
+          timedOut: false,
+          message: data.message || 'Submission failed.',
+        };
+      }
+
+      // Update local cache with server response
+      const updatedP = data.updatedParticipant;
+      if (updatedP) {
+        const localList = this.getLocalParticipants().map(part =>
+          part.id === participantId ? { ...part, ...updatedP } : part
+        );
+        this.saveLocalParticipants(localList);
+      }
+
       return {
-        isCorrect: false,
-        pointsAwarded: 0,
-        completedEvent: false,
-        updatedParticipant: currentParticipant,
-        timedOut: false,
-        message: 'Account disqualified / banned. Submissions rejected.',
+        isCorrect: data.isCorrect,
+        pointsAwarded: data.pointsAwarded || 0,
+        completedEvent: data.completedEvent || false,
+        updatedParticipant: updatedP ? { ...this.getLocalParticipants().find(p => p.id === participantId)!, ...updatedP } : null,
+        timedOut: data.timedOut || false,
+        award: data.award,
+        message: data.message,
       };
+    } catch {
+      if (!isDevMode()) {
+        return {
+          isCorrect: false,
+          pointsAwarded: 0,
+          completedEvent: false,
+          updatedParticipant: null,
+          timedOut: false,
+          message: 'Submission service unavailable. Please try again.',
+        };
+      }
     }
 
-    // Dynamically get the current questions directly from Supabase / store
+    // Local dev fallback — simplified scoring
+    const participants = this.getLocalParticipants();
+    const currentParticipant = participants.find(part => part.id === participantId);
+    if (currentParticipant?.is_banned) {
+      return { isCorrect: false, pointsAwarded: 0, completedEvent: false, updatedParticipant: currentParticipant, timedOut: false, message: 'Account disqualified / banned.' };
+    }
+
     const [questions, settings] = await Promise.all([
       this.getQuestions(),
       this.getCompetitionSettings(),
@@ -909,23 +954,14 @@ class StoreService {
     const activeQuestions = questions.slice(0, Math.max(1, settings.active_question_count));
     const currentQ = questions.find(q => q.id === questionId);
     if (!currentQ) {
-      return {
-        isCorrect: false,
-        pointsAwarded: 0,
-        completedEvent: false,
-        updatedParticipant: null,
-        timedOut: false,
-        message: 'Question not found.',
-      };
+      return { isCorrect: false, pointsAwarded: 0, completedEvent: false, updatedParticipant: null, timedOut: false, message: 'Question not found.' };
     }
 
-    // Clean comparison: remove surrounding whitespace, compare uppercase
     const cleanInput = rawAnswer.trim().toUpperCase();
     const cleanAnswer = currentQ.answer.trim().toUpperCase();
-
     const isCorrect = cleanInput === cleanAnswer;
 
-    // Record submission
+    // Record submission locally (#34 - only local in dev mode)
     const submission: Submission = {
       id: typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : 's-' + Date.now(),
       participant_id: participantId,
@@ -934,96 +970,38 @@ class StoreService {
       is_correct: isCorrect,
       created_at: new Date().toISOString(),
     };
-
-    const supabase = getSupabase();
-    if (supabase) {
-      try {
-        await supabase.from('submissions').insert([submission]);
-      } catch (err) {
-        console.warn('Supabase submission insert error', err);
-      }
-    }
     const submissions = this.getLocalSubmissions();
     submissions.push(submission);
     this.saveLocalSubmissions(submissions);
 
     if (!isCorrect) {
-      return {
-        isCorrect: false,
-        pointsAwarded: 0,
-        completedEvent: false,
-        updatedParticipant: null,
-        timedOut: false,
-        message: 'Incorrect cipher text decryption. Glitch detected! Try again.',
-      };
+      return { isCorrect: false, pointsAwarded: 0, completedEvent: false, updatedParticipant: null, timedOut: false, message: 'Incorrect cipher text decryption. Glitch detected! Try again.' };
     }
 
-    // Answer is correct! Enforce the per-question clock, then decay points.
-    // Elapsed time is computed from the stored question-start timestamp so the
-    // award never trusts the client clock.
-    const p = currentParticipant || (await this.getParticipants()).find(part => part.id === participantId);
+    const p = currentParticipant || this.getLocalParticipants().find(part => part.id === participantId);
     if (!p) {
-      return {
-        isCorrect: true,
-        pointsAwarded: currentQ.points,
-        completedEvent: false,
-        updatedParticipant: null,
-        timedOut: false,
-        message: 'Flag accepted!',
-      };
+      return { isCorrect: true, pointsAwarded: currentQ.points, completedEvent: false, updatedParticipant: null, timedOut: false, message: 'Flag accepted!' };
     }
 
-    const questionStartMs = p.current_question_started_at
-      ? new Date(p.current_question_started_at).getTime()
-      : Date.now();
-    const elapsedSeconds = Math.max(0, Math.floor((Date.now() - questionStartMs) / 1000));
-
-    if (elapsedSeconds > settings.time_limit_seconds) {
-      return {
-        isCorrect: false,
-        pointsAwarded: 0,
-        completedEvent: false,
-        updatedParticipant: p,
-        timedOut: true,
-        message: 'Time expired for this round. Use Skip to advance — this submission no longer counts.',
-      };
-    }
-
-    const awarded = Math.max(0, currentQ.points - elapsedSeconds * settings.decay_per_second);
+    const awarded = currentQ.points;
     const now = new Date().toISOString();
     const nextIndex = p.current_question_index + 1;
     const completedEvent = nextIndex >= activeQuestions.length;
     const newScore = p.score + awarded;
-    const completedAt = completedEvent ? now : null;
 
     const updatedData = {
       current_question_index: nextIndex,
       score: newScore,
       completed: completedEvent,
-      completed_at: completedAt,
+      completed_at: completedEvent ? now : null,
       current_question_started_at: now,
     };
 
-    if (supabase) {
-      try {
-        await supabase.from('participants').update(updatedData).eq('id', participantId);
-      } catch (err) {
-        console.warn('Supabase update progress error', err);
-      }
-    }
-
-    const updatedList = this.getLocalParticipants().map(part => {
-      if (part.id === participantId) {
-        return { ...part, ...updatedData };
-      }
-      return part;
-    });
+    const updatedList = this.getLocalParticipants().map(part =>
+      part.id === participantId ? { ...part, ...updatedData } : part
+    );
     this.saveLocalParticipants(updatedList);
-
     const updatedP = updatedList.find(part => part.id === participantId) || null;
-    const decayNote = awarded < currentQ.points
-      ? ` (decayed from ${currentQ.points} after ${elapsedSeconds}s)`
-      : '';
 
     return {
       isCorrect: true,
@@ -1031,10 +1009,10 @@ class StoreService {
       completedEvent,
       updatedParticipant: updatedP,
       timedOut: false,
-      award: { basePoints: currentQ.points, elapsedSeconds, awarded },
+      award: { basePoints: currentQ.points, elapsedSeconds: 0, awarded },
       message: completedEvent
-        ? `All ciphers breached! +${awarded} points${decayNote}. Decryption complete. Outstanding performance!`
-        : `Decryption successful! +${awarded} points${decayNote}. Accessing next security layer...`,
+        ? `All ciphers breached! +${awarded} points. Decryption complete. Outstanding performance!`
+        : `Decryption successful! +${awarded} points. Accessing next security layer...`,
     };
   }
 
@@ -1087,7 +1065,26 @@ class StoreService {
       };
     });
   }
+
+  // Re-fetch a single participant by ID (for stale session detection #27)
+  public async refreshParticipant(participantId: string): Promise<Participant | null> {
+    const supabase = getSupabase();
+    if (supabase) {
+      try {
+        const { data, error } = await supabase
+          .from('participants')
+          .select('id, username, team_name, current_question_index, score, completed, is_banned, warning_count, role, started_at, completed_at, created_at, current_question_started_at')
+          .eq('id', participantId)
+          .single();
+        if (error || !data) return null;
+        return data;
+      } catch {
+        return null;
+      }
+    }
+    const list = this.getLocalParticipants();
+    return list.find(p => p.id === participantId) || null;
+  }
 }
 
 export const store = new StoreService();
-

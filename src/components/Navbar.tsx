@@ -10,6 +10,7 @@ interface NavbarProps {
   onOpenLogin: () => void;
   isMuted: boolean;
   onToggleMute: () => void;
+  activeQuestionCount?: number;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -20,6 +21,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenLogin,
   isMuted,
   onToggleMute,
+  activeQuestionCount = 3,
 }) => {
   return (
     <header style={{
@@ -190,7 +192,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                   {participant.team_name || participant.username}
                 </div>
                 <div style={{ fontSize: '0.7rem', color: 'var(--accent-amber)', fontFamily: 'var(--font-mono)' }}>
-                  {participant.score} PTS • {participant.completed ? 'FINISHED' : `ROUND ${participant.current_question_index + 1}/3`}
+                  {participant.score} PTS • {participant.completed ? 'FINISHED' : `ROUND ${participant.current_question_index + 1}/${activeQuestionCount}`}
                 </div>
               </div>
               <button

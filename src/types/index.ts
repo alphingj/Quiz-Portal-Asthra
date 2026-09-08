@@ -1,7 +1,6 @@
 export interface Participant {
   id: string;
   username: string;
-  password?: string;
   team_name: string | null;
   current_question_index: number;
   score: number;

@@ -1,7 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import type { Participant, Question, CheatingWarning, CompetitionSettings } from '../types';
 import { DEFAULT_COMPETITION_SETTINGS } from '../types';
-import { store } from '../services/store';
+import { store, setAdminToken, getAdminToken } from '../services/store';
 import { 
   getSupabaseConfig, 
   saveSupabaseConfig, 
@@ -89,6 +89,16 @@ export const AdminPanel: React.FC = () => {
   const [compSettings, setCompSettings] = useState<CompetitionSettings>({ ...DEFAULT_COMPETITION_SETTINGS });
   const [compBusy, setCompBusy] = useState(false);
 
+  // Draft settings state (debounced save #15)
+  const [draftSettings, setDraftSettings] = useState<{
+    time_limit_seconds: number;
+    decay_per_second: number;
+    active_question_count: number;
+  } | null>(null);
+
+  // Loading error state (#26)
+  const [loadError, setLoadError] = useState<string | null>(null);
+
   // Warnings state & timeout penalties
   const [warnings, setWarnings] = useState<CheatingWarning[]>([]);
   const [loadingWarnings, setLoadingWarnings] = useState(false);
@@ -143,37 +153,58 @@ export const AdminPanel: React.FC = () => {
     setSupabaseKey(config.anonKey);
   }, []);
 
-  const refreshRoster = async () => {
+  const refreshRoster = useCallback(async () => {
     setLoadingRoster(true);
-    const list = await store.getParticipants();
-    setParticipants(list);
-    setLoadingRoster(false);
-  };
-
-  const refreshQuestions = async () => {
-    const qList = await store.getQuestions();
-    setQuestions(qList);
-  };
-
-  const refreshCompSettings = async () => {
-    const s = await store.getCompetitionSettings();
-    // Clamp active count to what actually exists so the UI never shows an
-    // impossible number after deletions.
-    const qList = await store.getQuestions();
-    if (s.active_question_count > qList.length && qList.length > 0) {
-      const fixed = await store.updateCompetitionSettings({ active_question_count: qList.length });
-      setCompSettings(fixed);
-    } else {
-      setCompSettings(s);
+    try {
+      const list = await store.getParticipants();
+      setParticipants(list);
+      setLoadError(null);
+    } catch (err: any) {
+      setLoadError(`Failed to load roster: ${err.message}`);
+    } finally {
+      setLoadingRoster(false);
     }
-  };
+  }, []);
 
-  const refreshWarnings = async () => {
+  const refreshQuestions = useCallback(async () => {
+    try {
+      const qList = await store.getQuestions();
+      setQuestions(qList);
+      setLoadError(null);
+    } catch (err: any) {
+      setLoadError(`Failed to load questions: ${err.message}`);
+    }
+  }, []);
+
+  const refreshCompSettings = useCallback(async () => {
+    try {
+      const s = await store.getCompetitionSettings();
+      const qList = await store.getQuestions();
+      if (s.active_question_count > qList.length && qList.length > 0) {
+        const fixed = await store.updateCompetitionSettings({ active_question_count: qList.length });
+        setCompSettings(fixed);
+      } else {
+        setCompSettings(s);
+      }
+      setDraftSettings(null); // Reset draft to match saved
+      setLoadError(null);
+    } catch (err: any) {
+      setLoadError(`Failed to load settings: ${err.message}`);
+    }
+  }, []);
+
+  const refreshWarnings = useCallback(async () => {
     setLoadingWarnings(true);
-    const list = await store.getWarnings();
-    setWarnings(list);
-    setLoadingWarnings(false);
-  };
+    try {
+      const list = await store.getWarnings();
+      setWarnings(list);
+      setLoadError(null);
+    } catch (err: any) {
+      setLoadError(`Failed to load warnings: ${err.message}`);
+    } finally {
+      setLoadingWarnings(false);
+    }
+  }, []);
 
   useEffect(() => {
     if (!isAdminAuthenticated) return;
@@ -252,9 +283,15 @@ export const AdminPanel: React.FC = () => {
         body: JSON.stringify({ passkey: passkeyInput }),
       });
       if (res.ok) {
+        const data = await res.json();
+        // Store JWT token for subsequent admin API calls (#3)
+        if (data.token) {
+          setAdminToken(data.token);
+        }
         grantAccess();
       } else {
-        denyAccess('Invalid Admin Passkey. Access restricted to Asthra 11.0 event staff.');
+        const data = await res.json().catch(() => ({}));
+        denyAccess(data.message || 'Invalid Admin Passkey. Access restricted to Asthra 11.0 event staff.');
       }
     } catch {
       // Fallback path: API unreachable (e.g. local `vite dev` without
@@ -273,13 +310,13 @@ export const AdminPanel: React.FC = () => {
     }
   };
 
-  const handleOpenResetPassword = (id: string, username: string, currentPassword: string) => {
+  const handleOpenResetPassword = (id: string, username: string) => {
     soundManager.playKeypress();
     setResetPasswordModal({
       isOpen: true,
       participantId: id,
       participantUsername: username,
-      currentPassword,
+      currentPassword: '(hidden)',
       newPassword: '',
       isSubmitting: false,
     });
@@ -449,11 +486,8 @@ export const AdminPanel: React.FC = () => {
     soundManager.playKeypress();
     try {
       const maxOrder = questions.reduce((m, q) => Math.max(m, q.order_index), 0);
-      const maxId = questions.reduce((m, q) => Math.max(m, q.id), 0);
-      // New id: for Supabase SERIAL tables omit id and let the DB assign it;
-      // for the local fallback use a timestamp-based id.
-      const payload: Question = {
-        id: maxId + 1,
+      // Single insert via admin API — DB assigns serial ID (#11)
+      const payload = {
         round_number: maxOrder + 1,
         title: addForm.title.trim(),
         cipher_type: addForm.cipher_type.trim(),
@@ -466,13 +500,22 @@ export const AdminPanel: React.FC = () => {
       };
       const supabase = getSupabase();
       if (supabase) {
-        const { id: _omitId, ...dbPayload } = payload;
-        const { data, error } = await supabase.from('questions').insert([dbPayload]).select().single();
-        if (error) throw new Error(error.message);
-        await store.saveQuestion(data || payload);
+        // Use admin API for single atomic insert
+        const token = getAdminToken();
+        const res = await fetch('/api/admin/action', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({ action: 'addQuestion', question: payload }),
+        });
+        const result = await res.json();
+        if (!res.ok || !result.ok) throw new Error(result.message || 'Failed to add question.');
       } else {
-        payload.id = Date.now();
-        await store.saveQuestion(payload);
+        // Local dev fallback
+        const localPayload = { ...payload, id: Date.now() } as Question;
+        await store.saveQuestion(localPayload);
       }
       const updated = await store.getQuestions();
       setQuestions(updated);
@@ -489,20 +532,52 @@ export const AdminPanel: React.FC = () => {
     }
   };
 
-  const handleActiveCountChange = async (count: number) => {
-    if (!Number.isFinite(count)) return;
-    const clamped = Math.min(Math.max(1, Math.floor(count)), Math.max(1, questions.length));
-    soundManager.playKeypress();
-    const next = await store.updateCompetitionSettings({ active_question_count: clamped });
-    setCompSettings(next);
-    refreshRoster();
+  // Draft settings: update locally, persist on explicit Save (#15)
+  const currentDraft = draftSettings || {
+    time_limit_seconds: compSettings.time_limit_seconds,
+    decay_per_second: compSettings.decay_per_second,
+    active_question_count: compSettings.active_question_count,
+  };
+  const hasDraftChanges = draftSettings !== null && (
+    draftSettings.time_limit_seconds !== compSettings.time_limit_seconds ||
+    draftSettings.decay_per_second !== compSettings.decay_per_second ||
+    draftSettings.active_question_count !== compSettings.active_question_count
+  );
+
+  const handleDraftChange = (field: string, value: number) => {
+    if (!Number.isFinite(value)) return;
+    setDraftSettings(prev => ({
+      time_limit_seconds: prev?.time_limit_seconds ?? compSettings.time_limit_seconds,
+      decay_per_second: prev?.decay_per_second ?? compSettings.decay_per_second,
+      active_question_count: prev?.active_question_count ?? compSettings.active_question_count,
+      [field]: value,
+    }));
   };
 
-  const handleTimingChange = async (field: 'time_limit_seconds' | 'decay_per_second', value: number) => {
-    if (!Number.isFinite(value)) return;
+  const handleSaveSettings = async () => {
+    if (!draftSettings) return;
+    const clamped = {
+      ...draftSettings,
+      active_question_count: Math.min(Math.max(1, Math.floor(draftSettings.active_question_count)), Math.max(1, questions.length)),
+      time_limit_seconds: Math.max(30, Math.floor(draftSettings.time_limit_seconds)),
+      decay_per_second: Math.max(0, Math.floor(draftSettings.decay_per_second)),
+    };
+    setCompBusy(true);
     soundManager.playKeypress();
-    const next = await store.updateCompetitionSettings({ [field]: value } as Partial<CompetitionSettings>);
-    setCompSettings(next);
+    try {
+      const next = await store.updateCompetitionSettings(clamped);
+      setCompSettings(next);
+      setDraftSettings(null);
+      refreshRoster();
+      soundManager.playSuccess();
+      setQuestionFeedback('Settings saved!');
+      setTimeout(() => setQuestionFeedback(null), 3000);
+    } catch (err: any) {
+      soundManager.playError();
+      setQuestionFeedback(`Error saving settings: ${err.message || 'Failed'}`);
+    } finally {
+      setCompBusy(false);
+    }
   };
 
   const handleStartCompetition = async () => {
@@ -728,6 +803,28 @@ export const AdminPanel: React.FC = () => {
   // Admin Authenticated View
   return (
     <div style={{ maxWidth: '1280px', margin: '30px auto 80px', padding: '0 24px' }}>
+      {loadError && (
+        <div style={{
+          marginBottom: '20px',
+          padding: '12px 16px',
+          borderRadius: '8px',
+          backgroundColor: 'rgba(255, 51, 102, 0.15)',
+          border: '1px solid rgba(255, 51, 102, 0.4)',
+          color: 'var(--neon-red)',
+          fontSize: '0.88rem',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between'
+        }}>
+          <span>{loadError}</span>
+          <button
+            onClick={() => setLoadError(null)}
+            style={{ background: 'none', border: 'none', color: 'var(--neon-red)', cursor: 'pointer', fontSize: '1rem' }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
       {/* Top Header */}
       <div style={{
         display: 'flex',
@@ -985,7 +1082,7 @@ export const AdminPanel: React.FC = () => {
                         {p.is_banned && <span style={{ marginLeft: '6px', fontSize: '0.7rem', color: 'var(--neon-red)' }}>[LOCKED]</span>}
                       </td>
                       <td style={{ padding: '14px 16px', fontFamily: 'var(--font-mono)', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-                        {p.password}
+                        •••••••• <span style={{ fontSize: '0.7rem', opacity: 0.6 }}>(hashed)</span>
                       </td>
                       <td style={{ padding: '14px 16px' }}>
                         {p.team_name ? (
@@ -1034,7 +1131,7 @@ export const AdminPanel: React.FC = () => {
                       <td style={{ padding: '14px 16px', textAlign: 'right' }}>
                         <div style={{ display: 'inline-flex', gap: '6px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
                           <button
-                            onClick={() => handleOpenResetPassword(p.id, p.username, p.password || '')}
+                            onClick={() => handleOpenResetPassword(p.id, p.username)}
                             title="Reset participant password"
                             className="cyber-btn cyber-btn-ghost"
                             style={{ padding: '6px 8px', fontSize: '0.75rem' }}
@@ -1172,8 +1269,8 @@ export const AdminPanel: React.FC = () => {
                   type="number"
                   min={1}
                   max={Math.max(1, questions.length)}
-                  value={compSettings.active_question_count}
-                  onChange={(e) => handleActiveCountChange(parseInt(e.target.value, 10))}
+                  value={currentDraft.active_question_count}
+                  onChange={(e) => handleDraftChange('active_question_count', parseInt(e.target.value, 10))}
                   className="cyber-input cyber-input-mono"
                   style={{ width: '100%', padding: '10px 14px', fontSize: '1rem' }}
                 />
@@ -1190,8 +1287,8 @@ export const AdminPanel: React.FC = () => {
                   type="number"
                   min={30}
                   step={10}
-                  value={compSettings.time_limit_seconds}
-                  onChange={(e) => handleTimingChange('time_limit_seconds', parseInt(e.target.value, 10))}
+                  value={currentDraft.time_limit_seconds}
+                  onChange={(e) => handleDraftChange('time_limit_seconds', parseInt(e.target.value, 10))}
                   className="cyber-input cyber-input-mono"
                   style={{ width: '100%', padding: '10px 14px', fontSize: '1rem' }}
                 />
@@ -1207,8 +1304,8 @@ export const AdminPanel: React.FC = () => {
                   type="number"
                   min={0}
                   step={1}
-                  value={compSettings.decay_per_second}
-                  onChange={(e) => handleTimingChange('decay_per_second', parseInt(e.target.value, 10))}
+                  value={currentDraft.decay_per_second}
+                  onChange={(e) => handleDraftChange('decay_per_second', parseInt(e.target.value, 10))}
                   className="cyber-input cyber-input-mono"
                   style={{ width: '100%', padding: '10px 14px', fontSize: '1rem' }}
                 />
@@ -1217,6 +1314,20 @@ export const AdminPanel: React.FC = () => {
                 </div>
               </div>
             </div>
+            {/* Save Settings Button (#15) */}
+            {hasDraftChanges && (
+              <div style={{ marginTop: '12px', display: 'flex', justifyContent: 'flex-end' }}>
+                <button
+                  onClick={handleSaveSettings}
+                  disabled={compBusy}
+                  className="cyber-btn cyber-btn-primary"
+                  style={{ fontSize: '0.85rem', padding: '8px 18px' }}
+                >
+                  <Save size={15} />
+                  {compBusy ? 'Saving...' : 'Save Settings'}
+                </button>
+              </div>
+            )}
           </div>
 
           <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '16px' }}>

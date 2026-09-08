@@ -66,29 +66,43 @@ export const QuizTerminal: React.FC<QuizTerminalProps> = ({
 
   const lastCheatReportRef = useRef<number>(0);
 
+  // Loading error state (#25)
+  const [loadError, setLoadError] = useState<string | null>(null);
+
   // Load questions + competition settings
   useEffect(() => {
     const fetchQ = async () => {
       setLoading(true);
-      const [qList, settings] = await Promise.all([
-        store.getQuestions(),
-        store.getCompetitionSettings(),
-      ]);
-      setQuestions(qList);
-      setCompSettings(settings);
-      setLoading(false);
+      try {
+        const [qList, settings] = await Promise.all([
+          store.getQuestions(),
+          store.getCompetitionSettings(),
+        ]);
+        setQuestions(qList);
+        setCompSettings(settings);
+        setLoadError(null);
+      } catch (err: any) {
+        setLoadError(err.message || 'Failed to load quiz data.');
+      } finally {
+        setLoading(false);
+      }
     };
     fetchQ();
 
     // Competition settings can flip live/ended mid-session (admin Start/End),
     // and the question list can change (admin add/delete/count)
     const handleSettingsUpdate = async () => {
-      const [qList, settings] = await Promise.all([
-        store.getQuestions(),
-        store.getCompetitionSettings(),
-      ]);
-      setQuestions(qList);
-      setCompSettings(settings);
+      try {
+        const [qList, settings] = await Promise.all([
+          store.getQuestions(),
+          store.getCompetitionSettings(),
+        ]);
+        setQuestions(qList);
+        setCompSettings(settings);
+        setLoadError(null);
+      } catch (err: any) {
+        setLoadError(err.message || 'Failed to refresh quiz data.');
+      }
     };
     window.addEventListener('asthra_data_update', handleSettingsUpdate);
     window.addEventListener('storage', handleSettingsUpdate);
@@ -394,6 +408,25 @@ export const QuizTerminal: React.FC<QuizTerminalProps> = ({
       <div style={{ textAlign: 'center', padding: '80px 20px', color: 'var(--neon-cyan)' }}>
         <RefreshCw size={36} className="animate-pulse" style={{ animationDuration: '1s' }} />
         <p style={{ marginTop: '16px', fontFamily: 'var(--font-mono)' }}>INITIALIZING CIPHER REPOSITORY...</p>
+      </div>
+    );
+  }
+
+  // State 2a: Load Error
+  if (loadError) {
+    return (
+      <div style={{ maxWidth: '600px', margin: '80px auto', padding: '0 20px', textAlign: 'center' }}>
+        <div className="glass-card" style={{ padding: '40px', border: '1px solid rgba(255, 51, 102, 0.4)' }}>
+          <p style={{ color: 'var(--neon-red)', fontFamily: 'var(--font-mono)', marginBottom: '20px' }}>
+            {loadError}
+          </p>
+          <button 
+            onClick={() => window.location.reload()} 
+            className="cyber-btn cyber-btn-primary"
+          >
+            Retry Connection
+          </button>
+        </div>
       </div>
     );
   }

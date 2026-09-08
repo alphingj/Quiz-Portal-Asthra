@@ -791,7 +791,7 @@ export const LiveLeaderboard: React.FC<LiveLeaderboardProps> = ({
                 <Terminal size={12} /> CRYPTOGRAPHY ROOM
               </span>
               <span className="cyber-badge cyber-badge-green">
-                <Flag size={12} /> 3 FLAGS TOTAL
+                <Flag size={12} /> {activeCount} FLAGS TOTAL
               </span>
               <span className="cyber-badge cyber-badge-amber">
                 <Flame size={12} /> ASTHRA 11.0 OFFICIAL
@@ -1048,17 +1048,13 @@ export const LiveLeaderboard: React.FC<LiveLeaderboardProps> = ({
                 @{activeEntries[0].username}
               </div>
 
-              {/* Flags Matrix Breakdown */}
-              <div style={{ display: 'flex', gap: '6px', marginBottom: '16px' }}>
-                <span className={`thm-flag-badge ${activeEntries[0].current_question_index >= 1 ? 'thm-flag-solved' : 'thm-flag-locked'}`}>
-                  F1: CAESAR
-                </span>
-                <span className={`thm-flag-badge ${activeEntries[0].current_question_index >= 2 ? 'thm-flag-solved' : 'thm-flag-locked'}`}>
-                  F2: HEX
-                </span>
-                <span className={`thm-flag-badge ${activeEntries[0].completed ? 'thm-flag-solved' : 'thm-flag-locked'}`}>
-                  F3: ROOT
-                </span>
+              {/* Dynamic Flags Matrix Breakdown (#22) */}
+              <div style={{ display: 'flex', gap: '6px', marginBottom: '16px', flexWrap: 'wrap' }}>
+                {solvedFlagsFor(activeEntries[0]).map((solved, i) => (
+                  <span key={i} className={`thm-flag-badge ${solved ? 'thm-flag-solved' : 'thm-flag-locked'}`}>
+                    {flagLabels[i] || `F${i + 1}`}
+                  </span>
+                ))}
               </div>
 
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', borderTop: '1px solid rgba(255, 255, 255, 0.06)', paddingTop: '12px' }}>
@@ -1111,17 +1107,13 @@ export const LiveLeaderboard: React.FC<LiveLeaderboardProps> = ({
                 @{activeEntries[1].username}
               </div>
 
-              {/* Flags Matrix Breakdown */}
-              <div style={{ display: 'flex', gap: '6px', marginBottom: '16px' }}>
-                <span className={`thm-flag-badge ${activeEntries[1].current_question_index >= 1 ? 'thm-flag-solved' : 'thm-flag-locked'}`}>
-                  F1: CAESAR
-                </span>
-                <span className={`thm-flag-badge ${activeEntries[1].current_question_index >= 2 ? 'thm-flag-solved' : 'thm-flag-locked'}`}>
-                  F2: HEX
-                </span>
-                <span className={`thm-flag-badge ${activeEntries[1].completed ? 'thm-flag-solved' : 'thm-flag-locked'}`}>
-                  F3: ROOT
-                </span>
+              {/* Dynamic Flags Matrix Breakdown (#22) */}
+              <div style={{ display: 'flex', gap: '6px', marginBottom: '16px', flexWrap: 'wrap' }}>
+                {solvedFlagsFor(activeEntries[1]).map((solved, i) => (
+                  <span key={i} className={`thm-flag-badge ${solved ? 'thm-flag-solved' : 'thm-flag-locked'}`}>
+                    {flagLabels[i] || `F${i + 1}`}
+                  </span>
+                ))}
               </div>
 
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', borderTop: '1px solid rgba(255, 255, 255, 0.06)', paddingTop: '12px' }}>
@@ -1174,17 +1166,13 @@ export const LiveLeaderboard: React.FC<LiveLeaderboardProps> = ({
                 @{activeEntries[2].username}
               </div>
 
-              {/* Flags Matrix Breakdown */}
-              <div style={{ display: 'flex', gap: '6px', marginBottom: '16px' }}>
-                <span className={`thm-flag-badge ${activeEntries[2].current_question_index >= 1 ? 'thm-flag-solved' : 'thm-flag-locked'}`}>
-                  F1: CAESAR
-                </span>
-                <span className={`thm-flag-badge ${activeEntries[2].current_question_index >= 2 ? 'thm-flag-solved' : 'thm-flag-locked'}`}>
-                  F2: HEX
-                </span>
-                <span className={`thm-flag-badge ${activeEntries[2].completed ? 'thm-flag-solved' : 'thm-flag-locked'}`}>
-                  F3: ROOT
-                </span>
+              {/* Dynamic Flags Matrix Breakdown (#22) */}
+              <div style={{ display: 'flex', gap: '6px', marginBottom: '16px', flexWrap: 'wrap' }}>
+                {solvedFlagsFor(activeEntries[2]).map((solved, i) => (
+                  <span key={i} className={`thm-flag-badge ${solved ? 'thm-flag-solved' : 'thm-flag-locked'}`}>
+                    {flagLabels[i] || `F${i + 1}`}
+                  </span>
+                ))}
               </div>
 
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', borderTop: '1px solid rgba(255, 255, 255, 0.06)', paddingTop: '12px' }}>

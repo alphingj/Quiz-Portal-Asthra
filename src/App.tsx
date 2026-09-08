@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import type { Participant } from './types';
 import { soundManager } from './services/audio';
+import { store } from './services/store';
 import { Navbar } from './components/Navbar';
 import { HeroRules } from './components/HeroRules';
 import { QuizTerminal } from './components/QuizTerminal';
@@ -14,6 +15,7 @@ export const App: React.FC = () => {
   const [participant, setParticipant] = useState<Participant | null>(null);
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
   const [isMuted, setIsMuted] = useState(soundManager.isMuted());
+  const [activeQuestionCount, setActiveQuestionCount] = useState(3);
 
   // Check URL pathname or hash for hidden admin route (/challenge/admin) to avoid directory scanners
   useEffect(() => {
@@ -35,16 +37,54 @@ export const App: React.FC = () => {
     };
   }, []);
 
-  // Load participant session from localStorage if present
+  // Load participant session from localStorage and re-verify against DB (#27)
   useEffect(() => {
     const saved = localStorage.getItem('asthra_active_participant');
     if (saved) {
       try {
-        setParticipant(JSON.parse(saved));
+        const parsed = JSON.parse(saved);
+        setParticipant(parsed);
+        // Re-fetch from DB to detect bans/resets/deletions (#27)
+        store.refreshParticipant(parsed.id).then(fresh => {
+          if (!fresh) {
+            // Participant was deleted from DB — clear session
+            setParticipant(null);
+            localStorage.removeItem('asthra_active_participant');
+          } else if (fresh.is_banned) {
+            // Participant was banned — clear session
+            setParticipant(null);
+            localStorage.removeItem('asthra_active_participant');
+          } else {
+            // Update with fresh data from DB
+            setParticipant(fresh);
+            localStorage.setItem('asthra_active_participant', JSON.stringify(fresh));
+          }
+        }).catch(() => {
+          // DB unreachable — keep local session as fallback
+        });
       } catch {
         // Ignore parse errors
       }
     }
+  }, []);
+
+  // Load competition settings for Navbar active count (#24)
+  useEffect(() => {
+    store.getCompetitionSettings().then(s => {
+      setActiveQuestionCount(s.active_question_count);
+    }).catch(() => {});
+
+    const handleUpdate = () => {
+      store.getCompetitionSettings().then(s => {
+        setActiveQuestionCount(s.active_question_count);
+      }).catch(() => {});
+    };
+    window.addEventListener('asthra_data_update', handleUpdate);
+    window.addEventListener('storage', handleUpdate);
+    return () => {
+      window.removeEventListener('asthra_data_update', handleUpdate);
+      window.removeEventListener('storage', handleUpdate);
+    };
   }, []);
 
   const [isProjectorMode, setIsProjectorMode] = useState(false);
@@ -93,6 +133,7 @@ export const App: React.FC = () => {
           onOpenLogin={() => setIsLoginModalOpen(true)}
           isMuted={isMuted}
           onToggleMute={handleToggleMute}
+          activeQuestionCount={activeQuestionCount}
         />
       )}
 
