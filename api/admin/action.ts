@@ -54,6 +54,15 @@ export default async function handler(req: Req, res: Res) {
   try {
     switch (action) {
       // --- Participant Management ---
+      case 'getParticipants': {
+        const { data, error } = await supabase
+          .from('participants')
+          .select('id, username, team_name, current_question_index, score, completed, is_banned, warning_count, role, started_at, completed_at, created_at, current_question_started_at')
+          .order('score', { ascending: false });
+        if (error) return res.status(400).json({ ok: false, message: error.message });
+        return res.status(200).json({ ok: true, participants: data || [] });
+      }
+
       case 'createParticipant': {
         const { username, password, teamName, role } = params;
         if (!username?.trim() || !password?.trim()) {
@@ -117,6 +126,9 @@ export default async function handler(req: Req, res: Res) {
 
       case 'updateRole': {
         const { id, role } = params;
+        if (!['admin', 'moderator', 'participant'].includes(role)) {
+          return res.status(400).json({ ok: false, message: 'Invalid role.' });
+        }
         const { error } = await supabase.from('participants').update({ role }).eq('id', id);
         if (error) return res.status(400).json({ ok: false, message: error.message });
         return res.status(200).json({ ok: true });
@@ -124,6 +136,9 @@ export default async function handler(req: Req, res: Res) {
 
       case 'banParticipant': {
         const { id, isBanned } = params;
+        if (typeof isBanned !== 'boolean') {
+          return res.status(400).json({ ok: false, message: 'Invalid ban state.' });
+        }
         const { error } = await supabase.from('participants').update({ is_banned: isBanned }).eq('id', id);
         if (error) return res.status(400).json({ ok: false, message: error.message });
         return res.status(200).json({ ok: true });
@@ -131,17 +146,39 @@ export default async function handler(req: Req, res: Res) {
 
       case 'deductPoints': {
         const { id, penalty } = params;
+        if (!Number.isFinite(Number(penalty)) || Number(penalty) < 0) {
+          return res.status(400).json({ ok: false, message: 'Penalty must be a non-negative number.' });
+        }
+        const numericPenalty = Number(penalty);
         // Fetch current score to calculate new score
         const { data: participant, error: fetchErr } = await supabase
           .from('participants').select('score').eq('id', id).single();
         if (fetchErr) return res.status(400).json({ ok: false, message: fetchErr.message });
-        const newScore = Math.max(0, (participant?.score || 0) - penalty);
+        const newScore = Math.max(0, (participant?.score || 0) - numericPenalty);
         const { error } = await supabase.from('participants').update({ score: newScore }).eq('id', id);
         if (error) return res.status(400).json({ ok: false, message: error.message });
         return res.status(200).json({ ok: true, newScore });
       }
 
       // --- Question Management ---
+      case 'getQuestions': {
+        const { data, error } = await supabase
+          .from('questions')
+          .select('*')
+          .order('order_index', { ascending: true });
+        if (error) return res.status(400).json({ ok: false, message: error.message });
+        return res.status(200).json({ ok: true, questions: data || [] });
+      }
+
+      case 'getWarnings': {
+        const { data, error } = await supabase
+          .from('warnings')
+          .select('*')
+          .order('created_at', { ascending: false });
+        if (error) return res.status(400).json({ ok: false, message: error.message });
+        return res.status(200).json({ ok: true, warnings: data || [] });
+      }
+
       case 'addQuestion': {
         const { question } = params;
         if (!question) return res.status(400).json({ ok: false, message: 'Question data required.' });
@@ -199,6 +236,33 @@ export default async function handler(req: Req, res: Res) {
           updated_at: new Date().toISOString(),
         }).eq('id', 1);
         if (error) return res.status(400).json({ ok: false, message: error.message });
+        return res.status(200).json({ ok: true });
+      }
+
+      case 'resetTrialData': {
+        const now = new Date().toISOString();
+        const { error: participantError } = await supabase.from('participants').update({
+          current_question_index: 0,
+          score: 0,
+          completed: false,
+          started_at: now,
+          completed_at: null,
+          current_question_started_at: now,
+          warning_count: 0,
+        }).neq('id', '00000000-0000-0000-0000-000000000000');
+        if (participantError) return res.status(400).json({ ok: false, message: participantError.message });
+
+        const { error: warningError } = await supabase.from('warnings')
+          .delete()
+          .neq('id', '00000000-0000-0000-0000-000000000000');
+        if (warningError) return res.status(400).json({ ok: false, message: warningError.message });
+
+        const { error: settingsError } = await supabase.from('competition_settings').update({
+          status: 'waiting',
+          started_at: null,
+          updated_at: now,
+        }).eq('id', 1);
+        if (settingsError) return res.status(400).json({ ok: false, message: settingsError.message });
         return res.status(200).json({ ok: true });
       }
 

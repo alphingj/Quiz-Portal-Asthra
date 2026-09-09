@@ -1,7 +1,7 @@
 // Vercel Serverless Function: participant question skip.
 // Calls the server-side rpc_skip_question RPC for validated timeout enforcement.
 
-import { getServiceSupabase } from '../_helpers.js';
+import { getParticipantId, getServiceSupabase } from '../_helpers.js';
 
 type Req = {
   method?: string;
@@ -21,14 +21,7 @@ export default async function handler(req: Req, res: Res) {
     return res.status(405).json({ ok: false, message: 'Method not allowed.' });
   }
 
-  let body: any;
-  try {
-    body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-  } catch {
-    return res.status(400).json({ ok: false, message: 'Invalid request body.' });
-  }
-
-  const { participantId } = body || {};
+  const participantId = getParticipantId(typeof req.headers?.authorization === 'string' ? req.headers.authorization : undefined);
   if (!participantId) {
     return res.status(400).json({ ok: false, message: 'participantId is required.' });
   }

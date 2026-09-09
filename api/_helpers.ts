@@ -23,6 +23,31 @@ export function signAdminToken(): string {
   return jwt.sign({ role: 'admin' }, secret, { expiresIn: '4h' });
 }
 
+/** Sign a short-lived participant session token. */
+export function signParticipantToken(participantId: string): string {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) throw new Error('Missing JWT_SECRET environment variable.');
+  return jwt.sign({ role: 'participant', participantId }, secret, { expiresIn: '12h' });
+}
+
+/** Return the participant ID from a valid participant bearer token. */
+export function getParticipantId(authHeader: string | undefined): string | null {
+  if (!authHeader) return null;
+  const secret = process.env.JWT_SECRET;
+  if (!secret) return null;
+  const token = authHeader.replace(/^Bearer\s+/i, '');
+  try {
+    const decoded = jwt.verify(token, secret);
+    if (typeof decoded !== 'object' || decoded === null) return null;
+    const claims = decoded as { role?: unknown; participantId?: unknown };
+    return claims.role === 'participant' && typeof claims.participantId === 'string'
+      ? claims.participantId
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Verify an admin JWT from the Authorization header. Returns true if valid. */
 export function verifyAdminToken(authHeader: string | undefined): boolean {
   if (!authHeader) return false;

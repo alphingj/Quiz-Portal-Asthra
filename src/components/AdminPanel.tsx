@@ -156,7 +156,7 @@ export const AdminPanel: React.FC = () => {
   const refreshRoster = useCallback(async () => {
     setLoadingRoster(true);
     try {
-      const list = await store.getParticipants();
+      const list = await store.getAdminParticipants();
       setParticipants(list);
       setLoadError(null);
     } catch (err: any) {
@@ -168,7 +168,7 @@ export const AdminPanel: React.FC = () => {
 
   const refreshQuestions = useCallback(async () => {
     try {
-      const qList = await store.getQuestions();
+      const qList = await store.getAdminQuestions();
       setQuestions(qList);
       setLoadError(null);
     } catch (err: any) {
@@ -179,7 +179,7 @@ export const AdminPanel: React.FC = () => {
   const refreshCompSettings = useCallback(async () => {
     try {
       const s = await store.getCompetitionSettings();
-      const qList = await store.getQuestions();
+      const qList = await store.getAdminQuestions();
       if (s.active_question_count > qList.length && qList.length > 0) {
         const fixed = await store.updateCompetitionSettings({ active_question_count: qList.length });
         setCompSettings(fixed);
@@ -296,11 +296,11 @@ export const AdminPanel: React.FC = () => {
     } catch {
       // Fallback path: API unreachable (e.g. local `vite dev` without
       // `vercel dev`). Compare against the dev-only env var.
-      if (DEV_ADMIN_PASSKEY && passkeyInput === DEV_ADMIN_PASSKEY) {
+      if (import.meta.env.DEV && DEV_ADMIN_PASSKEY && passkeyInput === DEV_ADMIN_PASSKEY) {
         grantAccess();
       } else {
         denyAccess(
-          DEV_ADMIN_PASSKEY
+            import.meta.env.DEV && DEV_ADMIN_PASSKEY
             ? 'Invalid Admin Passkey. Access restricted to Asthra 11.0 event staff.'
             : 'Admin verification service unreachable. Run via `vercel dev` or set VITE_ADMIN_PASSKEY for local development.'
         );
@@ -517,7 +517,7 @@ export const AdminPanel: React.FC = () => {
         const localPayload = { ...payload, id: Date.now() } as Question;
         await store.saveQuestion(localPayload);
       }
-      const updated = await store.getQuestions();
+      const updated = await store.getAdminQuestions();
       setQuestions(updated);
       soundManager.playSuccess();
       setQuestionFeedback(`"${payload.title}" added as Round ${payload.round_number}!`);
@@ -628,6 +628,25 @@ export const AdminPanel: React.FC = () => {
     } catch (err: any) {
       soundManager.playError();
       setQuestionFeedback(`Error: ${err.message || 'Failed'}`);
+    } finally {
+      setCompBusy(false);
+    }
+  };
+
+  const handleResetTrialData = async () => {
+    if (!confirm('RESET TRIAL DATA?\n\nThis clears all participant scores, progress, warning counts, and anti-cheat logs, then returns the event to WAITING. Questions and registered accounts remain.')) return;
+    setCompBusy(true);
+    soundManager.playKeypress();
+    try {
+      const next = await store.resetTrialData();
+      setCompSettings(next);
+      await Promise.all([refreshRoster(), refreshWarnings()]);
+      soundManager.playSuccess();
+      setQuestionFeedback('Trial data cleared. The event is ready for a fresh run.');
+      setTimeout(() => setQuestionFeedback(null), 5000);
+    } catch (err: any) {
+      soundManager.playError();
+      setQuestionFeedback(`Error resetting trial data: ${err.message || 'Failed'}`);
     } finally {
       setCompBusy(false);
     }
@@ -791,9 +810,6 @@ export const AdminPanel: React.FC = () => {
               {authLoading ? 'Verifying...' : 'Unlock Admin Terminal'}
             </button>
 
-            <div style={{ marginTop: '16px', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-              Default coordinator passkey: <code style={{ color: 'var(--neon-green)' }}>asthra11@admin</code>
-            </div>
           </form>
         </div>
       </div>
@@ -966,7 +982,7 @@ export const AdminPanel: React.FC = () => {
                   ACCESS PASSWORD <span style={{ color: 'var(--neon-green)' }}>*</span>
                 </label>
                 <input
-                  type="text"
+                  type="password"
                   required
                   placeholder="e.g. asthra2026"
                   value={newPassword}
@@ -1256,6 +1272,16 @@ export const AdminPanel: React.FC = () => {
                     Back to Waiting
                   </button>
                 )}
+                <button
+                  onClick={handleResetTrialData}
+                  disabled={compBusy}
+                  className="cyber-btn cyber-btn-ghost"
+                  style={{ fontSize: '0.85rem', padding: '8px 18px', border: '1px solid var(--accent-amber-border)', color: 'var(--accent-amber)' }}
+                  title="Clear trial scores, progress, warning counts and logs without deleting questions or accounts"
+                >
+                  <RotateCcw size={15} />
+                  Reset Trial Data
+                </button>
               </div>
             </div>
 

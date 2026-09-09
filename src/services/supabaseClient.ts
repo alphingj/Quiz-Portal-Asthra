@@ -19,8 +19,10 @@ export function getSupabaseConfig(): { url: string; anonKey: string } {
   if (envUrl && envKey) {
     return { url: envUrl.trim(), anonKey: envKey.trim() };
   }
-  const url = localStorage.getItem(STORAGE_URL_KEY) || envUrl;
-  const anonKey = localStorage.getItem(STORAGE_ANON_KEY) || envKey;
+  const localUrl = import.meta.env.DEV ? localStorage.getItem(STORAGE_URL_KEY) : null;
+  const localKey = import.meta.env.DEV ? localStorage.getItem(STORAGE_ANON_KEY) : null;
+  const url = localUrl || envUrl;
+  const anonKey = localKey || envKey;
   return { url: url.trim(), anonKey: anonKey.trim() };
 }
 
@@ -57,7 +59,7 @@ export async function testSupabaseConnection(): Promise<{ success: boolean; mess
     return { success: false, message: 'Supabase URL or Anon Key is missing or invalid.' };
   }
   try {
-    const { data, error } = await client.from('questions').select('id').limit(1);
+    const { data, error } = await client.from('questions_public').select('id').limit(1);
     if (error) {
       return { success: false, message: `Connected to Supabase, but query failed: ${error.message}. Have you run the schema script?` };
     }

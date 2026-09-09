@@ -2,7 +2,7 @@
 // Validates credentials server-side so passwords never transit to the browser.
 // Returns participant data without the password_hash field.
 
-import { getServiceSupabase } from '../_helpers.js';
+import { getServiceSupabase, signParticipantToken } from '../_helpers.js';
 import bcrypt from 'bcrypt';
 
 type Req = {
@@ -57,8 +57,14 @@ export default async function handler(req: Req, res: Res) {
       });
     }
 
-    // Compare password (stored as password_hash)
-    const isValid = await bcrypt.compare(password.trim(), data.password_hash);
+    // Compare bcrypt hashes. Existing installations may have renamed the old
+    // plaintext column to password_hash; accept it once, then upgrade in place.
+    let isValid = await bcrypt.compare(password.trim(), data.password_hash);
+    if (!isValid && data.password_hash === password.trim()) {
+      const upgradedHash = await bcrypt.hash(password.trim(), 10);
+      await supabase.from('participants').update({ password_hash: upgradedHash }).eq('id', data.id);
+      isValid = true;
+    }
     if (!isValid) {
       return res.status(401).json({ ok: false, message: 'Invalid password. Access denied.' });
     }
@@ -73,12 +79,14 @@ export default async function handler(req: Req, res: Res) {
     // Strip password_hash from response
     const { password_hash: _, ...safeParticipant } = data;
     const needsTeamName = !safeParticipant.team_name || safeParticipant.team_name.trim() === '';
+    const token = signParticipantToken(safeParticipant.id);
 
     return res.status(200).json({
       ok: true,
       message: 'Access granted. Welcome to KeyBreak!',
       participant: safeParticipant,
       needsTeamName,
+      token,
     });
   } catch (err: any) {
     console.error('Login error:', err);

@@ -50,6 +50,7 @@ const STORAGE_QUESTIONS = 'asthra_questions_data';
 const STORAGE_SUBMISSIONS = 'asthra_submissions_data';
 const STORAGE_WARNINGS = 'asthra_cheat_warnings_data';
 const STORAGE_SETTINGS = 'asthra_competition_settings';
+const STORAGE_PARTICIPANT_TOKEN = 'asthra_participant_token';
 
 // Admin JWT token management
 let adminToken: string | null = null;
@@ -70,9 +71,23 @@ export function clearAdminToken() {
   sessionStorage.removeItem('asthra_admin_token');
 }
 
+function setParticipantToken(token: string) {
+  sessionStorage.setItem(STORAGE_PARTICIPANT_TOKEN, token);
+}
+
+function getParticipantToken(): string | null {
+  return sessionStorage.getItem(STORAGE_PARTICIPANT_TOKEN);
+}
+
+export function clearParticipantToken() {
+  sessionStorage.removeItem(STORAGE_PARTICIPANT_TOKEN);
+}
+
 /** Check if we are in dev mode (no Supabase configured). */
 function isDevMode(): boolean {
-  return !getSupabase();
+  // Missing production configuration must fail closed; it must not silently
+  // turn the deployed event into a browser-local demo.
+  return Boolean(import.meta.env.DEV);
 }
 
 /** Call an admin API endpoint with JWT auth. */
@@ -209,6 +224,12 @@ class StoreService {
   }
 
   // Admin: update question (via API)
+  public async getAdminQuestions(): Promise<Question[]> {
+    if (isDevMode()) return this.getLocalQuestions();
+    const result = await adminApiCall('getQuestions');
+    return result.questions || [];
+  }
+
   public async updateQuestion(id: number, data: Partial<Question>): Promise<Question[]> {
     if (!isDevMode()) {
       await adminApiCall('updateQuestion', { id, data });
@@ -220,14 +241,14 @@ class StoreService {
         this.saveLocalQuestions(questions);
       }
     }
-    return this.getQuestions();
+    return isDevMode() ? this.getQuestions() : this.getAdminQuestions();
   }
 
   // Admin: save/upsert question (via API for Supabase, local for dev)
   public async saveQuestion(question: Question): Promise<Question[]> {
     if (!isDevMode()) {
       // When called from AdminPanel after API insert, just refresh from DB
-      return this.getQuestions();
+      return this.getAdminQuestions();
     }
     const questions = this.getLocalQuestions();
     const idx = questions.findIndex(q => q.id === question.id);
@@ -251,7 +272,7 @@ class StoreService {
         .map((q, i) => ({ ...q, order_index: i + 1, round_number: i + 1 }));
       this.saveLocalQuestions(renumbered);
     }
-    return this.getQuestions();
+    return isDevMode() ? this.getQuestions() : this.getAdminQuestions();
   }
 
   // --- COMPETITION SETTINGS API (timed-competition mode) ---
@@ -396,6 +417,32 @@ class StoreService {
     return next;
   }
 
+  // Clear trial scores/progress/warnings while preserving questions/settings.
+  public async resetTrialData(): Promise<CompetitionSettings> {
+    if (!isDevMode()) {
+      await adminApiCall('resetTrialData');
+      this.saveLocalWarnings([]);
+      return this.getCompetitionSettings();
+    }
+
+    const now = new Date().toISOString();
+    this.saveLocalParticipants(this.getLocalParticipants().map(p => ({
+      ...p,
+      current_question_index: 0,
+      score: 0,
+      completed: false,
+      started_at: now,
+      completed_at: null,
+      current_question_started_at: now,
+      warning_count: 0,
+    })));
+    this.saveLocalWarnings([]);
+    const settings = this.getLocalSettings();
+    const next = { ...settings, status: 'waiting' as const, started_at: null, updated_at: now };
+    this.saveLocalSettings(next);
+    return next;
+  }
+
   // Ensure a participant has a per-question start timestamp (backfills legacy
   // rows and late joiners). Returns the fresh participant row.
   public async ensureQuestionStart(participantId: string): Promise<Participant | null> {
@@ -404,31 +451,10 @@ class StoreService {
     if (!p) return null;
     if (p.current_question_started_at) return p;
 
+    // Production timestamps are initialized by the schema/start RPC. Do not
+    // attempt a client-side participant update through the public view.
+    if (!isDevMode()) return p;
     const now = new Date().toISOString();
-    const supabase = getSupabase();
-    if (supabase) {
-      try {
-        const { data, error } = await supabase
-          .from('participants')
-          .update({ current_question_started_at: now })
-          .eq('id', participantId)
-          .select()
-          .single();
-        if (error) {
-          console.warn('Supabase ensure question start error:', error.message);
-        } else if (data) {
-          // Strip password_hash if present
-          const { password_hash: _, ...safeData } = data as any;
-          const list = this.getLocalParticipants().map(part =>
-            part.id === participantId ? { ...part, current_question_started_at: now } : part
-          );
-          this.saveLocalParticipants(list);
-          return safeData as Participant;
-        }
-      } catch (err) {
-        console.warn('Supabase ensure question start error', err);
-      }
-    }
     const list = this.getLocalParticipants().map(part =>
       part.id === participantId ? { ...part, current_question_started_at: now } : part
     );
@@ -437,14 +463,20 @@ class StoreService {
   }
 
   // --- PARTICIPANTS API ---
+  public async getAdminParticipants(): Promise<Participant[]> {
+    if (isDevMode()) return this.getLocalParticipants();
+    const result = await adminApiCall('getParticipants');
+    return result.participants || [];
+  }
+
   public async getParticipants(): Promise<Participant[]> {
     const supabase = getSupabase();
     if (supabase) {
       try {
         // Select only safe columns — never select password_hash (#2)
         const { data, error } = await supabase
-          .from('participants')
-          .select('id, username, team_name, current_question_index, score, completed, is_banned, warning_count, role, started_at, completed_at, created_at, current_question_started_at')
+          .from('participants_public')
+          .select('id, username, team_name, current_question_index, score, completed, is_banned, started_at, completed_at, created_at, current_question_started_at')
           .order('score', { ascending: false });
         if (error) {
           console.warn('Supabase fetch participants error:', error.message);
@@ -620,28 +652,26 @@ class StoreService {
     };
 
     const supabase = getSupabase();
-    if (supabase) {
+    if (supabase && !isDevMode()) {
       try {
-        // Use atomic RPC for warning increment (#35)
-        const { data, error } = await supabase.rpc('rpc_increment_warning', {
-          p_participant_id: participantId,
-          p_username: username,
-          p_team_name: teamName,
-          p_event_type: eventType,
-          p_details: warning.details,
+        const token = getParticipantToken();
+        const res = await fetch('/api/participant/warning', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({ eventType, details: warning.details }),
         });
-        if (error) {
-          console.warn('Supabase warning RPC error:', error.message);
-        }
-        // Update local warning count from RPC result
-        if (data && data.warningCount) {
-          const list = this.getLocalParticipants().map(part =>
-            part.id === participantId ? { ...part, warning_count: data.warningCount } : part
-          );
-          this.saveLocalParticipants(list);
-        }
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.message || 'Warning service failed.');
+        const list = this.getLocalParticipants().map(part =>
+          part.id === participantId ? { ...part, warning_count: data.warningCount } : part
+        );
+        this.saveLocalParticipants(list);
       } catch (err) {
-        console.warn('Supabase warning insert error', err);
+        console.warn('Warning submission failed:', err);
+        throw err;
       }
     } else {
       // Dev mode: local increment
@@ -663,6 +693,20 @@ class StoreService {
   }
 
   public async getWarnings(): Promise<CheatingWarning[]> {
+    if (!isDevMode()) {
+      const result = await adminApiCall('getWarnings');
+      const formatted: CheatingWarning[] = (result.warnings || []).map((d: any) => ({
+        id: d.id,
+        participant_id: d.participant_id,
+        username: d.username,
+        team_name: d.team_name,
+        event_type: d.event_type,
+        details: d.details,
+        timestamp: d.created_at || new Date().toISOString(),
+      }));
+      this.saveLocalWarnings(formatted);
+      return formatted;
+    }
     const supabase = getSupabase();
     if (supabase) {
       try {
@@ -722,6 +766,7 @@ class StoreService {
 
       const data = await res.json();
       if (res.ok && data.ok) {
+        if (data.token) setParticipantToken(data.token);
         return {
           success: true,
           message: data.message || 'Access granted. Welcome to KeyBreak!',
@@ -759,28 +804,29 @@ class StoreService {
   // Update team name after login (if not set by admin) (#33 - update local cache)
   public async setTeamName(participantId: string, teamName: string): Promise<Participant | null> {
     const cleanTeam = teamName.trim();
-    const supabase = getSupabase();
+    if (!cleanTeam || cleanTeam.length > 100) return null;
 
-    if (supabase) {
+    if (!isDevMode()) {
+      const token = getParticipantToken();
       try {
-        const { data, error } = await supabase
-          .from('participants')
-          .update({ team_name: cleanTeam })
-          .eq('id', participantId)
-          .select('id, username, team_name, current_question_index, score, completed, is_banned, warning_count, role, started_at, completed_at, created_at, current_question_started_at')
-          .single();
-        if (error) {
-          console.warn('Supabase setTeamName error:', error.message);
-        } else if (data) {
-          // Update local cache (#33)
-          const list = this.getLocalParticipants().map(p =>
-            p.id === participantId ? { ...p, team_name: cleanTeam } : p
-          );
-          this.saveLocalParticipants(list);
-          return data;
-        }
+        const res = await fetch('/api/participant/team-name', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({ teamName: cleanTeam }),
+        });
+        const result = await res.json();
+        if (!res.ok || !result.ok) throw new Error(result.message || 'Unable to update team name.');
+        const list = this.getLocalParticipants().map(p =>
+          p.id === participantId ? { ...p, ...result.participant } : p
+        );
+        this.saveLocalParticipants(list);
+        return result.participant;
       } catch (err) {
-        console.warn('Supabase setTeamName error', err);
+        console.warn('Team name update failed:', err);
+        return null;
       }
     }
 
@@ -806,8 +852,11 @@ class StoreService {
     try {
       const res = await fetch('/api/participant/skip', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ participantId }),
+        headers: {
+          'Content-Type': 'application/json',
+          ...(getParticipantToken() ? { Authorization: `Bearer ${getParticipantToken()}` } : {}),
+        },
+        body: JSON.stringify({}),
       });
 
       const data = await res.json();
@@ -893,8 +942,11 @@ class StoreService {
     try {
       const res = await fetch('/api/participant/submit', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ participantId, questionId, rawAnswer }),
+        headers: {
+          'Content-Type': 'application/json',
+          ...(getParticipantToken() ? { Authorization: `Bearer ${getParticipantToken()}` } : {}),
+        },
+        body: JSON.stringify({ questionId, rawAnswer }),
       });
 
       const data = await res.json();
@@ -1068,18 +1120,18 @@ class StoreService {
 
   // Re-fetch a single participant by ID (for stale session detection #27)
   public async refreshParticipant(participantId: string): Promise<Participant | null> {
-    const supabase = getSupabase();
-    if (supabase) {
+    if (!isDevMode()) {
       try {
-        const { data, error } = await supabase
-          .from('participants')
-          .select('id, username, team_name, current_question_index, score, completed, is_banned, warning_count, role, started_at, completed_at, created_at, current_question_started_at')
-          .eq('id', participantId)
-          .single();
-        if (error || !data) return null;
-        return data;
+        const token = getParticipantToken();
+        const res = await fetch('/api/participant/me', {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+        if (res.status === 404 || res.status === 401) return null;
+        if (!res.ok) throw new Error('Participant service unavailable.');
+        const result = await res.json();
+        return result.ok ? result.participant : null;
       } catch {
-        return null;
+        throw new Error('Participant service unavailable.');
       }
     }
     const list = this.getLocalParticipants();

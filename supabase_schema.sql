@@ -25,7 +25,9 @@ CREATE TABLE IF NOT EXISTS public.participants (
     current_question_started_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Migration for existing deployments: rename password -> password_hash if needed
+-- Migration for existing deployments: rename password -> password_hash if needed.
+-- The participant login API performs a one-time bcrypt upgrade when it sees a
+-- legacy plaintext value. Do not expose password_hash through any public view.
 DO $$
 BEGIN
     IF EXISTS (
@@ -79,6 +81,12 @@ CREATE TABLE IF NOT EXISTS public.questions (
     difficulty TEXT DEFAULT 'Beginner',
     order_index INTEGER NOT NULL
 );
+
+-- Safe public leaderboard/participant view. Never includes password_hash.
+CREATE OR REPLACE VIEW public.participants_public AS
+SELECT id, username, team_name, current_question_index, score, completed,
+       is_banned, started_at, completed_at, created_at, current_question_started_at
+FROM public.participants;
 
 -- 3. Create public view that hides the answer column (#2)
 CREATE OR REPLACE VIEW public.questions_public AS
@@ -158,27 +166,32 @@ DROP POLICY IF EXISTS "anon_read_warnings" ON public.warnings;
 DROP POLICY IF EXISTS "anon_insert_warnings" ON public.warnings;
 DROP POLICY IF EXISTS "anon_read_settings" ON public.competition_settings;
 
--- PARTICIPANTS: anon can only read (password_hash excluded by client select)
-CREATE POLICY "anon_read_participants_safe" ON public.participants
-    FOR SELECT USING (true);
-
--- QUESTIONS: anon can read (client uses questions_public view to hide answer)
-CREATE POLICY "anon_read_questions" ON public.questions
-    FOR SELECT USING (true);
-
--- SUBMISSIONS: anon can read
-CREATE POLICY "anon_read_submissions" ON public.submissions
-    FOR SELECT USING (true);
-
--- WARNINGS: anon can read and insert (anti-cheat logging from client)
-CREATE POLICY "anon_read_warnings" ON public.warnings
-    FOR SELECT USING (true);
-CREATE POLICY "anon_insert_warnings" ON public.warnings
-    FOR INSERT WITH CHECK (true);
-
--- COMPETITION SETTINGS: anon can only read
+-- Public clients read only the safe question view and competition status.
 CREATE POLICY "anon_read_settings" ON public.competition_settings
-    FOR SELECT USING (true);
+    FOR SELECT TO anon, authenticated USING (true);
+
+-- No anon access to raw participants/questions/submissions/warnings. Admin APIs
+-- use service_role, participant mutations use authenticated server RPC routes.
+REVOKE ALL ON TABLE public.participants, public.questions, public.submissions, public.warnings FROM anon, authenticated;
+GRANT SELECT ON TABLE public.competition_settings TO anon, authenticated;
+GRANT SELECT ON public.questions_public TO anon, authenticated;
+GRANT SELECT ON public.participants_public TO anon, authenticated;
+
+-- View access must be explicit; the base answer-bearing table remains private.
+REVOKE ALL ON TABLE public.questions_public FROM anon, authenticated;
+GRANT SELECT ON TABLE public.questions_public TO anon, authenticated;
+
+-- Lock down SECURITY DEFINER RPCs to the server service role only.
+REVOKE ALL ON FUNCTION public.rpc_submit_answer(uuid, integer, text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.rpc_skip_question(uuid) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.rpc_start_competition() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.rpc_increment_warning(uuid, text, text, text, text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.rpc_delete_question(integer) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.rpc_submit_answer(uuid, integer, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.rpc_skip_question(uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.rpc_start_competition() TO service_role;
+GRANT EXECUTE ON FUNCTION public.rpc_increment_warning(uuid, text, text, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.rpc_delete_question(integer) TO service_role;
 
 -- ==============================================================================
 -- 8. Server-Side RPCs (called via service_role from API routes)
@@ -248,6 +261,10 @@ BEGIN
         v_settings.active_question_count,
         (SELECT COUNT(*) FROM questions)::INTEGER
     );
+
+    IF v_active_count <= 0 THEN
+        RETURN jsonb_build_object('success', false, 'message', 'No active questions configured.');
+    END IF;
 
     -- Check the question is the one the participant should be answering
     SELECT * INTO v_expected_question
@@ -395,6 +412,9 @@ BEGIN
         v_settings.active_question_count,
         (SELECT COUNT(*) FROM questions)::INTEGER
     );
+    IF v_active_count <= 0 THEN
+        RETURN jsonb_build_object('success', false, 'message', 'No active questions configured.');
+    END IF;
     v_next_index := v_participant.current_question_index + 1;
     v_completed := (v_next_index >= v_active_count);
 

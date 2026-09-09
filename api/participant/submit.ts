@@ -1,7 +1,7 @@
 // Vercel Serverless Function: participant answer submission.
 // Calls the server-side rpc_submit_answer RPC for atomic, validated scoring.
 
-import { getServiceSupabase } from '../_helpers.js';
+import { getParticipantId, getServiceSupabase } from '../_helpers.js';
 
 type Req = {
   method?: string;
@@ -28,7 +28,8 @@ export default async function handler(req: Req, res: Res) {
     return res.status(400).json({ ok: false, message: 'Invalid request body.' });
   }
 
-  const { participantId, questionId, rawAnswer } = body || {};
+  const participantId = getParticipantId(typeof req.headers?.authorization === 'string' ? req.headers.authorization : undefined);
+  const { questionId, rawAnswer } = body || {};
   if (!participantId || !questionId || typeof rawAnswer !== 'string') {
     return res.status(400).json({ ok: false, message: 'participantId, questionId, and rawAnswer are required.' });
   }

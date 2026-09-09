@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import type { Participant } from './types';
 import { soundManager } from './services/audio';
-import { store } from './services/store';
+import { clearParticipantToken, store } from './services/store';
 import { Navbar } from './components/Navbar';
 import { HeroRules } from './components/HeroRules';
 import { QuizTerminal } from './components/QuizTerminal';
@@ -108,6 +108,7 @@ export const App: React.FC = () => {
     soundManager.playKeypress();
     setParticipant(null);
     localStorage.removeItem('asthra_active_participant');
+    clearParticipantToken();
     handleTabChange('rules');
   };
 
