@@ -79,8 +79,16 @@ CREATE TABLE IF NOT EXISTS public.questions (
     answer TEXT NOT NULL,
     points INTEGER DEFAULT 100,
     difficulty TEXT DEFAULT 'Beginner',
-    order_index INTEGER NOT NULL
+    order_index INTEGER NOT NULL,
+    briefing TEXT,
+    clue_table JSONB,
+    stages JSONB
 );
+
+-- Add structured case content to existing question tables.
+ALTER TABLE public.questions ADD COLUMN IF NOT EXISTS briefing TEXT;
+ALTER TABLE public.questions ADD COLUMN IF NOT EXISTS clue_table JSONB;
+ALTER TABLE public.questions ADD COLUMN IF NOT EXISTS stages JSONB;
 
 -- Safe public leaderboard/participant view. Never includes password_hash.
 CREATE OR REPLACE VIEW public.participants_public AS
@@ -90,7 +98,8 @@ FROM public.participants;
 
 -- 3. Create public view that hides the answer column (#2)
 CREATE OR REPLACE VIEW public.questions_public AS
-SELECT id, round_number, title, cipher_type, ciphertext, clue, points, difficulty, order_index
+SELECT id, round_number, title, cipher_type, ciphertext, clue, points, difficulty, order_index,
+       briefing, clue_table, stages
 FROM public.questions;
 
 -- 4. Create Submissions Table
@@ -121,14 +130,15 @@ CREATE TABLE IF NOT EXISTS public.competition_settings (
     started_at TIMESTAMPTZ,
     time_limit_seconds INTEGER DEFAULT 600,
     decay_per_second INTEGER DEFAULT 1,
-    active_question_count INTEGER DEFAULT 3,
+    active_question_count INTEGER DEFAULT 4,
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- Seed the singleton settings row (safe to re-run)
 INSERT INTO public.competition_settings (id, status, time_limit_seconds, decay_per_second, active_question_count)
-VALUES (1, 'waiting', 600, 1, 3)
-ON CONFLICT (id) DO NOTHING;
+VALUES (1, 'waiting', 600, 1, 4)
+ON CONFLICT (id) DO UPDATE SET active_question_count = 4
+WHERE public.competition_settings.status = 'waiting';
 
 -- ==============================================================================
 -- 7. SECURE Row Level Security (RLS) Policies
@@ -580,40 +590,49 @@ BEGIN
     END LOOP;
 END $$;
 
--- 10. Seed Initial 3 Cryptography Questions
-INSERT INTO public.questions (round_number, title, cipher_type, ciphertext, clue, answer, points, difficulty, order_index)
-VALUES 
+-- 10. Seed Case #017: The Vanishing Prototype.
+-- Participant-facing content intentionally uses neutral technique labels.
+INSERT INTO public.questions (id, round_number, title, cipher_type, ciphertext, clue, answer, points, difficulty, order_index, briefing, clue_table, stages)
+VALUES
 (
-    1, 
-    'Round 1: The Caesar Breach', 
-    'Caesar Cipher (ROT-3)', 
-    'DVWKUD{EUHDN_WKH_FLSKHU_11}', 
-    'Shift each letter backward by 3 positions in the alphabet (A -> X, D -> A). The flag starts with ASTHRA{...}', 
-    'ASTHRA{BREAK_THE_CIPHER_11}', 
-    100, 
-    'Beginner', 
-    1
+    1, 1, 'Stage 1: Find the Key', 'Clock-Key Letter Shift', 'AOL JSHL ZLA',
+    'The clock never lies. Find the person who entered last. Ignore the minutes. The hour is your key.',
+    'THE CLUE SET', 150, 'Beginner', 1,
+    'At 7:45 PM, a high-value cybersecurity prototype disappears from a restricted laboratory. Three individuals were logged entering before the incident.',
+    '{"headers":["Person","Entry Time"],"rows":[["Neha","6:15 PM"],["Rahul","6:40 PM"],["Vikram","7:20 PM"]]}', NULL
 ),
 (
-    2, 
-    'Round 2: The Raw Memory Stream', 
-    'Hexadecimal ASCII Stream', 
-    '41 53 54 48 52 41 7b 48 34 43 4b 5f 54 48 33 5f 50 4c 41 4e 33 54 7d', 
+    2, 2, 'Stage 2: Find the Suspect', 'Fixed Letter Disguise', 'KQIXS',
+    'Every letter has one disguise. The disguise never changes. Use the letter table to reveal the suspect.',
+    'RAHUL', 175, 'Intermediate', 2,
+    'A coded message is recovered inside Locker 5. Suspect profiles and department assignments are retrieved from the personnel database.',
+    '{"headers":["Plain","A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z"],"rows":[["Cipher","Q","W","E","R","T","Y","U","I","O","P","A","S","D","F","G","H","J","K","L","Z","X","C","V","B","N","M"]]}', NULL
+),
+(
+    3, 3, 'Stage 3: Follow the Evidence', 'Two-Track Reading', 'VKATOIIRMOKT',
+    'Read between the tracks. Count the entries after 7 PM. That number tells you how many tracks to use.',
+    'VIKRAM TOOK IT', 200, 'Advanced', 3,
+    'Investigators recover a CCTV access log containing a scrambled transmission sequence.',
+    '{"headers":["Time","Person","Activity Location"],"rows":[["6:30 PM","Neha","Printer"],["6:50 PM","Rahul","Database"],["7:15 PM","Vikram","CCTV Log"],["7:30 PM","Neha","Server Room"]]}', NULL
+),
+(
+    4, 4, 'Stage 4: Final Deduction', 'Two-Lock Evidence Chain', 'RUSELIALTCPTHIHUR',
+    'There are three suspects. Use their number as the first key. The number you find opens the first lock; the final truth travels across two tracks.',
+    'RAHUL IS THE CULPRIT', 250, 'Advanced', 4,
+    'A final encrypted payload is discovered on the central laboratory server. It contains a two-stage locking mechanism that pinpoints the true culprit.',
     NULL,
-    'ASTHRA{H4CK_TH3_PLAN3T}', 
-    150, 
-    'Intermediate', 
-    2
-),
-(
-    3, 
-    'Round 3: The Polyalphabetic Citadel', 
-    'Vigenère Cipher', 
-    'SFXZLE{GOMC_MEV_XCPPT}', 
-    'The tech fest name itself (ASTHRA) was used as the repeating keyword key to lock this flag.', 
-    'ASTHRA{CODE_AND_CONQR}', 
-    200, 
-    'Advanced', 
-    3
+    '[{"label":"Stage 1 clue","clue":"There are three suspects. Use their number as the first key.","payload":"WKH NHB LV 3"},{"label":"Stage 1 result","clue":"The first lock reveals the number needed for the final lock.","payload":"THE KEY IS 3"},{"label":"Stage 2 clue","clue":"The number you found opens the first lock. The final truth travels across two tracks.","payload":"RUSELIALTCPTHIHUR"}]'
 )
-ON CONFLICT (id) DO NOTHING;
+ON CONFLICT (id) DO UPDATE SET
+    round_number = EXCLUDED.round_number,
+    title = EXCLUDED.title,
+    cipher_type = EXCLUDED.cipher_type,
+    ciphertext = EXCLUDED.ciphertext,
+    clue = EXCLUDED.clue,
+    answer = EXCLUDED.answer,
+    points = EXCLUDED.points,
+    difficulty = EXCLUDED.difficulty,
+    order_index = EXCLUDED.order_index,
+    briefing = EXCLUDED.briefing,
+    clue_table = EXCLUDED.clue_table,
+    stages = EXCLUDED.stages;

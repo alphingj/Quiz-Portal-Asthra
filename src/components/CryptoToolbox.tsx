@@ -4,11 +4,11 @@ import { soundManager } from '../services/audio';
 
 export const CryptoToolbox: React.FC = () => {
   const [isOpen, setIsOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<'caesar' | 'hex' | 'notes'>('caesar');
+  const [activeTab, setActiveTab] = useState<'shift' | 'hex' | 'notes'>('shift');
 
-  // Caesar tool state
-  const [caesarInput, setCaesarInput] = useState('');
-  const [caesarShift, setCaesarShift] = useState(3);
+  // Alphabet shift helper state
+  const [shiftInput, setShiftInput] = useState('');
+  const [shiftAmount, setShiftAmount] = useState(3);
 
   // Hex tool state
   const [hexInput, setHexInput] = useState('');
@@ -17,8 +17,8 @@ export const CryptoToolbox: React.FC = () => {
   // Scratchpad
   const [notes, setNotes] = useState('');
 
-  // Caesar cipher calculation (backward shift to decode)
-  const decodeCaesar = (str: string, shift: number): string => {
+  // Backward alphabet shift calculation
+  const decodeShift = (str: string, shift: number): string => {
     return str
       .split('')
       .map((char) => {
@@ -95,11 +95,11 @@ export const CryptoToolbox: React.FC = () => {
           {/* Subtabs */}
           <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
             <button
-              onClick={() => { soundManager.playKeypress(); setActiveTab('caesar'); }}
-              className={`cyber-btn ${activeTab === 'caesar' ? 'cyber-btn-secondary' : 'cyber-btn-ghost'}`}
+              onClick={() => { soundManager.playKeypress(); setActiveTab('shift'); }}
+              className={`cyber-btn ${activeTab === 'shift' ? 'cyber-btn-secondary' : 'cyber-btn-ghost'}`}
               style={{ fontSize: '0.8rem', padding: '6px 14px' }}
             >
-              Caesar ROT Solver
+              Alphabet Shift Solver
             </button>
             <button
               onClick={() => { soundManager.playKeypress(); setActiveTab('hex'); }}
@@ -117,36 +117,36 @@ export const CryptoToolbox: React.FC = () => {
             </button>
           </div>
 
-          {/* CAESAR ROT SOLVER */}
-          {activeTab === 'caesar' && (
+           {/* Alphabet shift helper */}
+          {activeTab === 'shift' && (
             <div>
               <div style={{ display: 'flex', gap: '12px', alignItems: 'center', marginBottom: '12px' }}>
                 <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                  Alphabet Shift: <strong style={{ color: 'var(--accent-amber)' }}>-{caesarShift}</strong>
+                   Alphabet Shift: <strong style={{ color: 'var(--accent-amber)' }}>-{shiftAmount}</strong>
                 </span>
                 <input
                   type="range"
                   min="1"
                   max="25"
-                  value={caesarShift}
-                  onChange={(e) => setCaesarShift(Number(e.target.value))}
+                   value={shiftAmount}
+                   onChange={(e) => setShiftAmount(Number(e.target.value))}
                   style={{ flex: 1, accentColor: 'var(--accent-amber)', cursor: 'pointer' }}
                 />
                 <button
-                  onClick={() => setCaesarShift(3)}
+                   onClick={() => setShiftAmount(3)}
                   className="cyber-btn cyber-btn-ghost"
                   style={{ fontSize: '0.75rem', padding: '4px 8px' }}
-                  title="Reset to Caesar ROT-3"
+                   title="Reset shift to 3"
                 >
-                  <RotateCcw size={14} /> ROT-3
+                   <RotateCcw size={14} /> Shift 3
                 </button>
               </div>
 
               <input
                 type="text"
                 placeholder="Paste encrypted text to decode (e.g. DVWKUD{...})"
-                value={caesarInput}
-                onChange={(e) => setCaesarInput(e.target.value)}
+                 value={shiftInput}
+                 onChange={(e) => setShiftInput(e.target.value)}
                 className="cyber-input cyber-input-mono"
                 style={{ marginBottom: '12px' }}
               />
@@ -165,12 +165,12 @@ export const CryptoToolbox: React.FC = () => {
                     Decoded Output
                   </div>
                   <div style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent-amber)', fontSize: '0.95rem', fontWeight: 600 }}>
-                    {caesarInput ? decodeCaesar(caesarInput, caesarShift) : 'Decoded message will appear here...'}
+                     {shiftInput ? decodeShift(shiftInput, shiftAmount) : 'Decoded message will appear here...'}
                   </div>
                 </div>
-                {caesarInput && (
+                 {shiftInput && (
                   <button
-                    onClick={() => copyToClipboard(decodeCaesar(caesarInput, caesarShift))}
+                   onClick={() => copyToClipboard(decodeShift(shiftInput, shiftAmount))}
                     className="cyber-btn cyber-btn-ghost"
                     style={{ padding: '6px 10px', fontSize: '0.78rem' }}
                   >

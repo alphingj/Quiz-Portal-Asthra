@@ -760,6 +760,61 @@ export const QuizTerminal: React.FC<QuizTerminalProps> = ({
           </div>
 
           {/* Cipher Text Display Box */}
+          {currentQuestion.briefing && (
+            <div style={{
+              marginBottom: '22px',
+              padding: '16px 18px',
+              borderLeft: '3px solid var(--neon-cyan)',
+              background: 'rgba(0, 240, 255, 0.05)',
+              color: 'var(--text-secondary)',
+              lineHeight: 1.65,
+              fontSize: '0.92rem'
+            }}>
+              <strong style={{ display: 'block', color: 'var(--neon-cyan)', fontSize: '0.75rem', letterSpacing: '0.08em', marginBottom: '6px' }}>
+                CASE BRIEFING
+              </strong>
+              {currentQuestion.briefing}
+            </div>
+          )}
+
+          {currentQuestion.clue_table && (
+            <div style={{ marginBottom: '24px', overflowX: 'auto' }}>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '7px', letterSpacing: '0.06em' }}>
+                EVIDENCE TABLE
+              </div>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.82rem', minWidth: '520px' }}>
+                <thead>
+                  <tr>
+                    {currentQuestion.clue_table.headers.map((header) => (
+                      <th key={header} style={{ textAlign: 'left', padding: '9px 10px', color: 'var(--neon-cyan)', borderBottom: '1px solid rgba(0, 240, 255, 0.25)', fontFamily: 'var(--font-mono)' }}>{header}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {currentQuestion.clue_table.rows.map((row, rowIndex) => (
+                    <tr key={`${rowIndex}-${row[0]}`}>
+                      {row.map((cell, cellIndex) => (
+                        <td key={`${rowIndex}-${cellIndex}`} style={{ padding: '9px 10px', color: '#e2e8f0', borderBottom: '1px solid rgba(255, 255, 255, 0.06)' }}>{cell}</td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {currentQuestion.stages && currentQuestion.stages.length > 0 && (
+            <div style={{ marginBottom: '24px', display: 'grid', gap: '10px' }}>
+              {currentQuestion.stages.map((stage) => (
+                <div key={stage.label} style={{ padding: '12px 14px', border: '1px solid rgba(255, 176, 32, 0.22)', background: 'rgba(255, 176, 32, 0.05)', borderRadius: 'var(--radius-sm)' }}>
+                  <strong style={{ display: 'block', color: 'var(--accent-amber)', fontSize: '0.78rem', marginBottom: '5px' }}>{stage.label}</strong>
+                  {stage.clue && <div style={{ color: 'var(--text-secondary)', lineHeight: 1.5, marginBottom: stage.payload ? '7px' : 0 }}>{stage.clue}</div>}
+                  {stage.payload && <code style={{ color: 'var(--neon-cyan)', fontFamily: 'var(--font-mono)', wordBreak: 'break-all' }}>{stage.payload}</code>}
+                </div>
+              ))}
+            </div>
+          )}
+
           <div style={{ marginBottom: '28px' }}>
             <div style={{
               display: 'flex',

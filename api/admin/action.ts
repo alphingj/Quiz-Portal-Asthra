@@ -190,7 +190,12 @@ export default async function handler(req: Req, res: Res) {
 
       case 'updateQuestion': {
         const { id, data: qData } = params;
-        const { error } = await supabase.from('questions').update(qData).eq('id', id);
+        if (!Number.isInteger(id) || !qData || typeof qData !== 'object') {
+          return res.status(400).json({ ok: false, message: 'Invalid question update.' });
+        }
+        const allowed = ['round_number', 'title', 'cipher_type', 'ciphertext', 'clue', 'answer', 'points', 'difficulty', 'order_index', 'briefing', 'clue_table', 'stages'];
+        const update = Object.fromEntries(Object.entries(qData).filter(([key]) => allowed.includes(key)));
+        const { error } = await supabase.from('questions').update(update).eq('id', id);
         if (error) return res.status(400).json({ ok: false, message: error.message });
         return res.status(200).json({ ok: true });
       }

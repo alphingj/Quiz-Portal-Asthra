@@ -17,7 +17,7 @@ export const VictoryModal: React.FC<VictoryModalProps> = ({
   participant,
   onClose,
   onViewLeaderboard,
-  totalRounds = 3,
+  totalRounds = 4,
 }) => {
   useEffect(() => {
     if (isOpen) {

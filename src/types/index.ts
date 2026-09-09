@@ -25,6 +25,20 @@ export interface Question {
   points: number;
   difficulty: 'Beginner' | 'Intermediate' | 'Advanced';
   order_index: number;
+  briefing?: string | null;
+  clue_table?: ClueTable | null;
+  stages?: ClueStage[] | null;
+}
+
+export interface ClueTable {
+  headers: string[];
+  rows: string[][];
+}
+
+export interface ClueStage {
+  label: string;
+  clue?: string | null;
+  payload?: string | null;
 }
 
 export interface Submission {
@@ -84,7 +98,7 @@ export const DEFAULT_COMPETITION_SETTINGS: CompetitionSettings = {
   started_at: null,
   time_limit_seconds: 600,
   decay_per_second: 1,
-  active_question_count: 3,
+  active_question_count: 4,
   updated_at: new Date().toISOString(),
 };
 
@@ -94,4 +108,3 @@ export interface AwardBreakdown {
   awarded: number;
   timedOut: boolean;
 }
-

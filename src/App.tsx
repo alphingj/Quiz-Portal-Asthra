@@ -15,7 +15,7 @@ export const App: React.FC = () => {
   const [participant, setParticipant] = useState<Participant | null>(null);
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
   const [isMuted, setIsMuted] = useState(soundManager.isMuted());
-  const [activeQuestionCount, setActiveQuestionCount] = useState(3);
+  const [activeQuestionCount, setActiveQuestionCount] = useState(4);
 
   // Check URL pathname or hash for hidden admin route (/challenge/admin) to avoid directory scanners
   useEffect(() => {

@@ -1421,7 +1421,7 @@ export const AdminPanel: React.FC = () => {
                     </span>
                     <strong style={{ fontSize: '1.15rem', color: '#ffffff' }}>{q.title}</strong>
                     <div style={{ fontSize: '0.82rem', color: 'var(--neon-green)', fontFamily: 'var(--font-mono)', marginTop: '4px' }}>
-                      ALGORITHM: {q.cipher_type}
+                      METHOD LABEL: {q.cipher_type}
                     </div>
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -1465,6 +1465,29 @@ export const AdminPanel: React.FC = () => {
                   </div>
                 </div>
 
+                {q.briefing && (
+                  <div style={{ marginBottom: '14px', padding: '12px 14px', borderLeft: '3px solid var(--neon-cyan)', background: 'rgba(0, 240, 255, 0.05)', color: 'var(--text-secondary)', lineHeight: 1.55, fontSize: '0.84rem' }}>
+                    <strong style={{ display: 'block', color: 'var(--neon-cyan)', fontSize: '0.72rem', marginBottom: '4px' }}>CASE BRIEFING</strong>
+                    {q.briefing}
+                  </div>
+                )}
+
+                {q.clue_table && (
+                  <div style={{ marginBottom: '14px', overflowX: 'auto' }}>
+                    <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginBottom: '4px' }}>EVIDENCE TABLE</div>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.78rem', minWidth: '520px' }}>
+                      <thead><tr>{q.clue_table.headers.map((header) => <th key={header} style={{ textAlign: 'left', padding: '7px 9px', color: 'var(--neon-cyan)', borderBottom: '1px solid rgba(0, 240, 255, 0.2)' }}>{header}</th>)}</tr></thead>
+                      <tbody>{q.clue_table.rows.map((row, rowIndex) => <tr key={`${rowIndex}-${row[0]}`}>{row.map((cell, cellIndex) => <td key={`${rowIndex}-${cellIndex}`} style={{ padding: '7px 9px', color: '#e2e8f0', borderBottom: '1px solid rgba(255, 255, 255, 0.05)' }}>{cell}</td>)}</tr>)}</tbody>
+                    </table>
+                  </div>
+                )}
+
+                {q.stages && q.stages.length > 0 && (
+                  <div style={{ marginBottom: '14px', display: 'grid', gap: '7px' }}>
+                    {q.stages.map((stage) => <div key={stage.label} style={{ padding: '9px 11px', border: '1px solid rgba(255, 176, 32, 0.2)', background: 'rgba(255, 176, 32, 0.04)', borderRadius: '5px', fontSize: '0.8rem' }}><strong style={{ color: 'var(--accent-amber)' }}>{stage.label}</strong>{stage.clue && <div style={{ color: 'var(--text-secondary)', marginTop: '3px' }}>{stage.clue}</div>}{stage.payload && <code style={{ color: 'var(--neon-cyan)' }}>{stage.payload}</code>}</div>)}
+                  </div>
+                )}
+
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '14px' }}>
                   <div>
                     <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '4px', letterSpacing: '0.06em' }}>
@@ -1484,7 +1507,7 @@ export const AdminPanel: React.FC = () => {
 
                   <div>
                     <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '4px', letterSpacing: '0.06em' }}>
-                      EXPECTED DECRYPTION ANSWER (EQUATED IN SUPABASE):
+                      EXPECTED ANSWER (STORED SECURELY):
                     </div>
                     <div style={{
                       padding: '10px 14px',
@@ -1607,7 +1630,7 @@ export const AdminPanel: React.FC = () => {
 
                   <div style={{ marginBottom: '16px' }}>
                     <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>
-                      CIPHERTEXT (ENCRYPTED MESSAGE PRESENTED TO TEAMS)
+                        PAYLOAD (MESSAGE PRESENTED TO TEAMS)
                     </label>
                     <textarea
                       rows={3}
@@ -1621,11 +1644,11 @@ export const AdminPanel: React.FC = () => {
 
                   <div style={{ marginBottom: '16px' }}>
                     <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>
-                      TACTICAL CLUE (OPTIONAL - LEAVE BLANK TO OMIT CLUE)
+                        CLUE (OPTIONAL - LEAVE BLANK TO OMIT CLUE)
                     </label>
                     <textarea
                       rows={2}
-                      placeholder="e.g. Shift each letter backward by 3 positions... (or empty for no clue)"
+                        placeholder="Enter the investigation clue shown to teams..."
                       value={editForm.clue || ''}
                       onChange={(e) => setEditForm({ ...editForm, clue: e.target.value.trim() ? e.target.value : null })}
                       className="cyber-input"
@@ -1635,7 +1658,7 @@ export const AdminPanel: React.FC = () => {
 
                   <div style={{ marginBottom: '24px' }}>
                     <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--neon-green)', fontWeight: 700, marginBottom: '4px' }}>
-                      EXPECTED DECRYPTION ANSWER (FLAG FORMAT) <span style={{ color: 'var(--neon-cyan)' }}>* EQUATED ON SUBMISSION</span>
+                        EXPECTED ANSWER <span style={{ color: 'var(--neon-cyan)' }}>* CHECKED ON SUBMISSION</span>
                     </label>
                     <input
                       type="text"
@@ -1719,12 +1742,12 @@ export const AdminPanel: React.FC = () => {
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '14px', marginBottom: '16px' }}>
                     <div>
                       <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>
-                        QUESTION TITLE *
+                        STAGE TITLE *
                       </label>
                       <input
                         type="text"
                         required
-                        placeholder="e.g. Round 4: The XOR Vault"
+                        placeholder="e.g. Stage 5: Trace the Signal"
                         value={addForm.title}
                         onChange={(e) => setAddForm({ ...addForm, title: e.target.value })}
                         className="cyber-input"
@@ -1733,12 +1756,12 @@ export const AdminPanel: React.FC = () => {
 
                     <div>
                       <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>
-                        CIPHER ALGORITHM TYPE *
+                        METHOD LABEL *
                       </label>
                       <input
                         type="text"
                         required
-                        placeholder="e.g. XOR Cipher"
+                        placeholder="e.g. Layered Evidence Path"
                         value={addForm.cipher_type}
                         onChange={(e) => setAddForm({ ...addForm, cipher_type: e.target.value })}
                         className="cyber-input"
@@ -1783,7 +1806,7 @@ export const AdminPanel: React.FC = () => {
 
                   <div style={{ marginBottom: '16px' }}>
                     <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>
-                      CIPHERTEXT (ENCRYPTED MESSAGE PRESENTED TO TEAMS) *
+                        PAYLOAD (MESSAGE PRESENTED TO TEAMS) *
                     </label>
                     <textarea
                       rows={3}
@@ -1797,7 +1820,7 @@ export const AdminPanel: React.FC = () => {
 
                   <div style={{ marginBottom: '16px' }}>
                     <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>
-                      TACTICAL CLUE (OPTIONAL - LEAVE BLANK TO OMIT CLUE)
+                        CLUE (OPTIONAL - LEAVE BLANK TO OMIT CLUE)
                     </label>
                     <textarea
                       rows={2}
@@ -1810,7 +1833,7 @@ export const AdminPanel: React.FC = () => {
 
                   <div style={{ marginBottom: '24px' }}>
                     <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--neon-green)', fontWeight: 700, marginBottom: '4px' }}>
-                      EXPECTED DECRYPTION ANSWER (FLAG FORMAT) *
+                        EXPECTED ANSWER *
                     </label>
                     <input
                       type="text"
