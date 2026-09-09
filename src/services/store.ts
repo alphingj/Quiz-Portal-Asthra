@@ -139,9 +139,9 @@ class StoreService {
     }
   }
 
-  private saveLocalParticipants(participants: Participant[]) {
+  private saveLocalParticipants(participants: Participant[], notify = true) {
     localStorage.setItem(STORAGE_PARTICIPANTS, JSON.stringify(participants));
-    this.notifyDataUpdate();
+    if (notify) this.notifyDataUpdate();
   }
 
   private getLocalQuestions(): Question[] {
@@ -157,9 +157,9 @@ class StoreService {
     }
   }
 
-  private saveLocalQuestions(questions: Question[]) {
+  private saveLocalQuestions(questions: Question[], notify = true) {
     localStorage.setItem(STORAGE_QUESTIONS, JSON.stringify(questions));
-    this.notifyDataUpdate();
+    if (notify) this.notifyDataUpdate();
   }
 
   private getLocalSubmissions(): Submission[] {
@@ -187,9 +187,9 @@ class StoreService {
     }
   }
 
-  private saveLocalWarnings(warnings: CheatingWarning[]) {
+  private saveLocalWarnings(warnings: CheatingWarning[], notify = true) {
     localStorage.setItem(STORAGE_WARNINGS, JSON.stringify(warnings));
-    this.notifyDataUpdate();
+    if (notify) this.notifyDataUpdate();
   }
 
   // --- QUESTIONS API ---
@@ -209,7 +209,7 @@ class StoreService {
         }
         // Distinguish empty result from failure (#36)
         if (data) {
-          this.saveLocalQuestions(data);
+          this.saveLocalQuestions(data, false);
           return data;
         }
       } catch (err) {
@@ -290,9 +290,9 @@ class StoreService {
     }
   }
 
-  private saveLocalSettings(settings: CompetitionSettings) {
+  private saveLocalSettings(settings: CompetitionSettings, notify = true) {
     localStorage.setItem(STORAGE_SETTINGS, JSON.stringify(settings));
-    this.notifyDataUpdate();
+    if (notify) this.notifyDataUpdate();
   }
 
   public async getCompetitionSettings(): Promise<CompetitionSettings> {
@@ -318,7 +318,7 @@ class StoreService {
             active_question_count: Number(data.active_question_count) || 3,
             updated_at: data.updated_at || new Date().toISOString(),
           };
-          this.saveLocalSettings(settings);
+          this.saveLocalSettings(settings, false);
           return settings;
         }
       } catch (err) {
@@ -485,7 +485,7 @@ class StoreService {
           if (!isDevMode()) throw new Error(`Database error: ${error.message}`);
         }
         if (!error && data) {
-          this.saveLocalParticipants(data);
+          this.saveLocalParticipants(data, false);
           return data;
         }
       } catch (err) {
@@ -707,7 +707,7 @@ class StoreService {
         details: d.details,
         timestamp: d.created_at || new Date().toISOString(),
       }));
-      this.saveLocalWarnings(formatted);
+      this.saveLocalWarnings(formatted, false);
       return formatted;
     }
     const supabase = getSupabase();
@@ -731,7 +731,7 @@ class StoreService {
             details: d.details,
             timestamp: d.created_at || d.timestamp || new Date().toISOString(),
           }));
-          this.saveLocalWarnings(formatted);
+          this.saveLocalWarnings(formatted, false);
           return formatted;
         }
       } catch (err) {

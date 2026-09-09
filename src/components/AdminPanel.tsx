@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import type { Participant, Question, CheatingWarning, CompetitionSettings } from '../types';
 import { DEFAULT_COMPETITION_SETTINGS } from '../types';
 import { store, setAdminToken, getAdminToken } from '../services/store';
@@ -98,6 +98,8 @@ export const AdminPanel: React.FC = () => {
 
   // Loading error state (#26)
   const [loadError, setLoadError] = useState<string | null>(null);
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const refreshInFlightRef = useRef(false);
 
   // Warnings state & timeout penalties
   const [warnings, setWarnings] = useState<CheatingWarning[]>([]);
@@ -206,13 +208,28 @@ export const AdminPanel: React.FC = () => {
     }
   }, []);
 
+  const refreshAll = useCallback(async () => {
+    if (refreshInFlightRef.current) return;
+    refreshInFlightRef.current = true;
+    try {
+      await Promise.all([refreshRoster(), refreshQuestions(), refreshWarnings(), refreshCompSettings()]);
+    } finally {
+      refreshInFlightRef.current = false;
+    }
+  }, [refreshRoster, refreshQuestions, refreshWarnings, refreshCompSettings]);
+
+  const scheduleRefresh = useCallback(() => {
+    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    refreshTimerRef.current = setTimeout(() => {
+      refreshAll();
+      refreshTimerRef.current = null;
+    }, 150);
+  }, [refreshAll]);
+
   useEffect(() => {
     if (!isAdminAuthenticated) return;
 
-    refreshRoster();
-    refreshQuestions();
-    refreshWarnings();
-    refreshCompSettings();
+    refreshAll();
 
     // Realtime Supabase subscription for Admin Panel
     const client = getSupabase();
@@ -222,16 +239,16 @@ export const AdminPanel: React.FC = () => {
         channel = client
           .channel('public:admin_panel_live')
           .on('postgres_changes', { event: '*', schema: 'public', table: 'participants' }, () => {
-            refreshRoster();
+            scheduleRefresh();
           })
           .on('postgres_changes', { event: '*', schema: 'public', table: 'warnings' }, () => {
-            refreshWarnings();
+            scheduleRefresh();
           })
           .on('postgres_changes', { event: '*', schema: 'public', table: 'questions' }, () => {
-            refreshQuestions();
+            scheduleRefresh();
           })
           .on('postgres_changes', { event: '*', schema: 'public', table: 'competition_settings' }, () => {
-            refreshCompSettings();
+            scheduleRefresh();
           })
           .subscribe();
       } catch (err) {
@@ -241,10 +258,7 @@ export const AdminPanel: React.FC = () => {
 
     // Local / cross-tab broadcast updates
     const handleLocalUpdate = () => {
-      refreshRoster();
-      refreshQuestions();
-      refreshWarnings();
-      refreshCompSettings();
+      scheduleRefresh();
     };
     window.addEventListener('asthra_data_update', handleLocalUpdate);
     window.addEventListener('storage', handleLocalUpdate);
@@ -255,8 +269,9 @@ export const AdminPanel: React.FC = () => {
       }
       window.removeEventListener('asthra_data_update', handleLocalUpdate);
       window.removeEventListener('storage', handleLocalUpdate);
+      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
     };
-  }, [isAdminAuthenticated]);
+  }, [isAdminAuthenticated, refreshAll, scheduleRefresh]);
 
   const handleAdminAuth = async (e: React.FormEvent) => {
     e.preventDefault();
