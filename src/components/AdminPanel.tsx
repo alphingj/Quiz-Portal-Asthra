@@ -287,6 +287,9 @@ export const AdminPanel: React.FC = () => {
         // Store JWT token for subsequent admin API calls (#3)
         if (data.token) {
           setAdminToken(data.token);
+        } else if (!import.meta.env.DEV) {
+          denyAccess('Admin authentication did not return a session token.');
+          return;
         }
         grantAccess();
       } else {

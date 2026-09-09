@@ -5,7 +5,7 @@ import { getParticipantId, getServiceSupabase } from '../_helpers.js';
 
 type Req = {
   method?: string;
-  body?: unknown;
+  headers?: Record<string, string | string[] | undefined>;
 };
 
 type Res = {
@@ -23,7 +23,7 @@ export default async function handler(req: Req, res: Res) {
 
   const participantId = getParticipantId(typeof req.headers?.authorization === 'string' ? req.headers.authorization : undefined);
   if (!participantId) {
-    return res.status(400).json({ ok: false, message: 'participantId is required.' });
+    return res.status(401).json({ ok: false, message: 'Unauthorized participant session.' });
   }
 
   let supabase;

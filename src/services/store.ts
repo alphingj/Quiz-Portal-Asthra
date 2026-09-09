@@ -220,6 +220,7 @@ class StoreService {
         console.warn('Supabase fetch questions error, fallback to local', err);
       }
     }
+    if (!isDevMode()) throw new Error('Supabase is not configured. Configure production database environment variables.');
     return this.getLocalQuestions();
   }
 
@@ -325,6 +326,7 @@ class StoreService {
         console.warn('Supabase fetch settings error, fallback to local', err);
       }
     }
+    if (!isDevMode()) throw new Error('Supabase is not configured. Configure production database environment variables.');
     return this.getLocalSettings();
   }
 
@@ -491,6 +493,7 @@ class StoreService {
         console.warn('Supabase fetch participants error, fallback to local', err);
       }
     }
+    if (!isDevMode()) throw new Error('Supabase is not configured. Configure production database environment variables.');
     return this.getLocalParticipants();
   }
 
