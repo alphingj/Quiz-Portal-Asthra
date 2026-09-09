@@ -468,7 +468,8 @@ BEGIN
         completed = false,
         started_at = v_now,
         completed_at = NULL,
-        current_question_started_at = v_now;
+        current_question_started_at = v_now
+    WHERE id IS NOT NULL;
 
     UPDATE competition_settings SET
         status = 'live',
