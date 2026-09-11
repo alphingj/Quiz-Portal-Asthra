@@ -21,7 +21,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenLogin,
   isMuted,
   onToggleMute,
-  activeQuestionCount = 4,
+  activeQuestionCount = 5,
 }) => {
   return (
     <header style={{

@@ -98,7 +98,7 @@ export const DEFAULT_COMPETITION_SETTINGS: CompetitionSettings = {
   started_at: null,
   time_limit_seconds: 600,
   decay_per_second: 1,
-  active_question_count: 4,
+  active_question_count: 5,
   updated_at: new Date().toISOString(),
 };
 

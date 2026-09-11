@@ -130,14 +130,14 @@ CREATE TABLE IF NOT EXISTS public.competition_settings (
     started_at TIMESTAMPTZ,
     time_limit_seconds INTEGER DEFAULT 600,
     decay_per_second INTEGER DEFAULT 1,
-    active_question_count INTEGER DEFAULT 4,
+    active_question_count INTEGER DEFAULT 5,
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- Seed the singleton settings row (safe to re-run)
 INSERT INTO public.competition_settings (id, status, time_limit_seconds, decay_per_second, active_question_count)
-VALUES (1, 'waiting', 600, 1, 4)
-ON CONFLICT (id) DO UPDATE SET active_question_count = 4
+VALUES (1, 'waiting', 600, 1, 5)
+ON CONFLICT (id) DO UPDATE SET active_question_count = 5
 WHERE public.competition_settings.status = 'waiting';
 
 -- ==============================================================================
@@ -616,12 +616,18 @@ VALUES
     '{"headers":["Time","Person","Activity Location"],"rows":[["6:30 PM","Neha","Printer"],["6:50 PM","Rahul","Database"],["7:15 PM","Vikram","CCTV Log"],["7:30 PM","Neha","Server Room"]]}', NULL
 ),
 (
-    4, 4, 'Stage 4: Final Deduction', 'Two-Lock Evidence Chain', 'RUSELIALTCPTHIHUR',
-    'There are three suspects. Use their number as the first key. The number you find opens the first lock; the final truth travels across two tracks.',
-    'RAHUL IS THE CULPRIT', 250, 'Advanced', 4,
-    'A final encrypted payload is discovered on the central laboratory server. It contains a two-stage locking mechanism that pinpoints the true culprit.',
-    NULL,
-    '[{"label":"Stage 1 clue","clue":"There are three suspects. Use their number as the first key.","payload":"WKH NHB LV 3"},{"label":"Stage 1 result","clue":"The first lock reveals the number needed for the final lock.","payload":"THE KEY IS 3"},{"label":"Stage 2 clue","clue":"The number you found opens the first lock. The final truth travels across two tracks.","payload":"RUSELIALTCPTHIHUR"}]'
+    4, 4, 'Stage 4a: First Lock', 'Simple Shift Lock', 'WKH NHB LV 3',
+    'Three suspects means the key is three. A simple shift reveals the first number.',
+    'THE KEY IS 3', 150, 'Intermediate', 4,
+    'The first lock uses a simple shift. Three suspects means the key is three.',
+    NULL, NULL
+),
+(
+    5, 5, 'Stage 4b: Final Truth', 'Two-Track Reading', 'RUSELIALTCPTHIHUR',
+    'The number you found opens the first lock. The final truth travels across two tracks.',
+    'RAHUL IS THE CULPRIT', 250, 'Advanced', 5,
+    'The final payload travels across two tracks. Use the number from the first lock.',
+    '{"headers":["Time","Person","Activity Location"],"rows":[["6:30 PM","Neha","Printer"],["6:50 PM","Rahul","Database"],["7:15 PM","Vikram","CCTV Log"],["7:30 PM","Neha","Server Room"]]}', NULL
 )
 ON CONFLICT (id) DO UPDATE SET
     round_number = EXCLUDED.round_number,

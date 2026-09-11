@@ -2,7 +2,7 @@ import type { Participant, Question, Submission, LeaderboardEntry, CheatingWarni
 import { DEFAULT_COMPETITION_SETTINGS } from '../types';
 import { getSupabase } from './supabaseClient';
 
-// Default 3 cipher questions for Asthra 11.0: KeyBreak
+// Default 5 cipher questions for Asthra 11.0: KeyBreak
 export const INITIAL_QUESTIONS: Question[] = [
   {
     id: 1,
@@ -49,20 +49,29 @@ export const INITIAL_QUESTIONS: Question[] = [
   {
     id: 4,
     round_number: 4,
-    title: 'Stage 4: Final Deduction',
-    cipher_type: 'Two-Lock Evidence Chain',
+    title: 'Stage 4a: First Lock',
+    cipher_type: 'Simple Shift Lock',
+    ciphertext: 'WKH NHB LV 3',
+    clue: 'Three suspects means the key is three. A simple shift reveals the first number.',
+    briefing: 'The first lock uses a simple shift. Three suspects means the key is three.',
+    answer: 'THE KEY IS 3',
+    points: 150,
+    difficulty: 'Intermediate',
+    order_index: 4,
+  },
+  {
+    id: 5,
+    round_number: 5,
+    title: 'Stage 4b: Final Truth',
+    cipher_type: 'Two-Track Reading',
     ciphertext: 'RUSELIALTCPTHIHUR',
-    clue: 'There are three suspects. Use their number as the first key. The number you find opens the first lock; the final truth travels across two tracks.',
-    briefing: 'A final encrypted payload is discovered on the central laboratory server. It contains a two-stage locking mechanism that pinpoints the true culprit.',
-    stages: [
-      { label: 'Stage 1 clue', clue: 'There are three suspects. Use their number as the first key.', payload: 'WKH NHB LV 3' },
-      { label: 'Stage 1 result', clue: 'The first lock reveals the number needed for the final lock.', payload: 'THE KEY IS 3' },
-      { label: 'Stage 2 clue', clue: 'The number you found opens the first lock. The final truth travels across two tracks.', payload: 'RUSELIALTCPTHIHUR' },
-    ],
+    clue: 'The number you found opens the first lock. The final truth travels across two tracks.',
+    briefing: 'The final payload travels across two tracks. Use the number from the first lock.',
+    clue_table: { headers: ['Time', 'Person', 'Activity Location'], rows: [['6:30 PM', 'Neha', 'Printer'], ['6:50 PM', 'Rahul', 'Database'], ['7:15 PM', 'Vikram', 'CCTV Log'], ['7:30 PM', 'Neha', 'Server Room']] },
     answer: 'RAHUL IS THE CULPRIT',
     points: 250,
     difficulty: 'Advanced',
-    order_index: 4,
+    order_index: 5,
   },
 ];
 
@@ -339,7 +348,7 @@ class StoreService {
             started_at: data.started_at || null,
             time_limit_seconds: Number(data.time_limit_seconds) || 600,
             decay_per_second: Number(data.decay_per_second) || 1,
-            active_question_count: Number(data.active_question_count) || 4,
+            active_question_count: Number(data.active_question_count) || 5,
             updated_at: data.updated_at || new Date().toISOString(),
           };
           this.saveLocalSettings(settings, false);
